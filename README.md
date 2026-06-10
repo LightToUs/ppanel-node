@@ -1,9 +1,3 @@
-# PPanel-node
-
-A PPanel node server based on xray-core, modified from v2node.  
-一个基于xray内核的PPanel节点服务端，修改自v2node
-
-## 软件安装
 
 ### 一键安装
 
