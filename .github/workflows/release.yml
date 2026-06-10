@@ -2,25 +2,11 @@ name: Build and Release
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-      - master
-      - develop
-    paths:
-      - "**/*.go"
-      - "go.mod"
-      - "go.sum"
-      - ".github/workflows/*.yml"
-  pull_request:
-    types: [opened, synchronize, reopened]
-    paths:
-      - "**/*.go"
-      - "go.mod"
-      - "go.sum"
-      - ".github/workflows/*.yml"
-  release:
-    types: [published]
+    inputs:
+      release_tag:
+        description: "Existing Git tag and GitHub release tag to build and upload assets for"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -103,6 +89,8 @@ jobs:
     steps:
       - name: Checkout codebase
         uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.release_tag }}
       - name: Show workflow information
         id: get_filename
         run: |
@@ -118,24 +106,19 @@ jobs:
       - name: Get project dependencies
         run: GOEXPERIMENT=jsonv2 go mod download
       - name: Get release version
-        if: ${{ github.event_name == 'release' }}
         run: |
-          echo "version=$(echo $GITHUB_REF | cut -d / -f 3)" >> $GITHUB_ENV
-      - name: Get other version
-        if: ${{ github.event_name != 'release' }}
-        run: |
-          echo "version=${{ github.sha }}" >> $GITHUB_ENV
+          echo "version=${{ inputs.release_tag }}" >> $GITHUB_ENV
       - name: Build
         run: |
           echo "version: $version"
           mkdir -p build_assets
-          GOEXPERIMENT=jsonv2 go build -v -o build_assets/ppnode -trimpath -ldflags "-X 'github.com/perfect-panel/ppanel-node/cmd.version=$version' -s -w -buildid="
+          GOEXPERIMENT=jsonv2 go build -v -o build_assets/ppnode -trimpath -ldflags "-X 'github.com/lighttous/ppanel-node/cmd.version=$version' -s -w -buildid="
 
       - name: Build Mips softfloat
         if: matrix.goarch == 'mips' || matrix.goarch == 'mipsle'
         run: |
           echo "version: $version"
-          GOEXPERIMENT=jsonv2 GOMIPS=softfloat go build -v -o build_assets/ppnode_softfloat -trimpath -ldflags "-X 'github.com/perfect-panel/ppanel-node/cmd.version=$version' -s -w -buildid="
+          GOEXPERIMENT=jsonv2 GOMIPS=softfloat go build -v -o build_assets/ppnode_softfloat -trimpath -ldflags "-X 'github.com/lighttous/ppanel-node/cmd.version=$version' -s -w -buildid="
       - name: Rename Windows
         if: matrix.goos == 'windows'
         run: |
@@ -177,9 +160,8 @@ jobs:
             ./ppanel-node-${{ steps.get_filename.outputs.ASSET_NAME }}/*
       - name: Upload binaries to release
         uses: svenstaro/upload-release-action@v2
-        if: github.event_name == 'release'
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           file: ./ppanel-node-${{ steps.get_filename.outputs.ASSET_NAME }}.zip*
-          tag: ${{ github.ref }}
+          tag: ${{ inputs.release_tag }}
           file_glob: true

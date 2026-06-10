@@ -77,22 +77,8 @@ fi
 
 git fetch "${TARGET_REMOTE}" --tags >/dev/null 2>&1 || true
 
-if git rev-parse -q --verify "refs/tags/${VERSION_TAG}" >/dev/null 2>&1; then
-  echo "Error: local tag ${VERSION_TAG} already exists." >&2
-  exit 1
-fi
-
-if git ls-remote --exit-code --tags "${TARGET_REMOTE}" "refs/tags/${VERSION_TAG}" >/dev/null 2>&1; then
-  echo "Error: remote tag ${VERSION_TAG} already exists in ${TARGET_REPO}." >&2
-  exit 1
-fi
-
-if gh release view "${VERSION_TAG}" --repo "${TARGET_REPO}" >/dev/null 2>&1; then
-  echo "Error: release ${VERSION_TAG} already exists in ${TARGET_REPO}." >&2
-  exit 1
-fi
-
 CURRENT_SHA="$(git rev-parse --short HEAD)"
+CURRENT_FULL_SHA="$(git rev-parse HEAD)"
 RELEASE_NOTES=$(cat <<EOF
 Automated release ${VERSION_TAG}
 
@@ -108,14 +94,50 @@ echo "  commit: ${CURRENT_SHA}"
 echo "  remote: ${TARGET_REMOTE} -> ${REMOTE_URL}"
 
 git push "${TARGET_REMOTE}" HEAD:"refs/heads/${TARGET_BRANCH}"
-git tag -a "${VERSION_TAG}" -m "Release ${VERSION_TAG}"
-git push "${TARGET_REMOTE}" "refs/tags/${VERSION_TAG}"
 
-gh release create "${VERSION_TAG}" \
+local_tag_exists=false
+if git rev-parse -q --verify "refs/tags/${VERSION_TAG}" >/dev/null 2>&1; then
+  local_tag_exists=true
+  local_tag_commit="$(git rev-list -n 1 "refs/tags/${VERSION_TAG}")"
+  if [[ "${local_tag_commit}" != "${CURRENT_FULL_SHA}" ]]; then
+    echo "Error: local tag ${VERSION_TAG} points to ${local_tag_commit}, expected ${CURRENT_FULL_SHA}." >&2
+    exit 1
+  fi
+fi
+
+remote_tag_exists=false
+remote_tag_commit="$(git ls-remote "${TARGET_REMOTE}" "refs/tags/${VERSION_TAG}^{}" | awk '{print $1}')"
+if [[ -n "${remote_tag_commit}" ]]; then
+  remote_tag_exists=true
+  if [[ "${remote_tag_commit}" != "${CURRENT_FULL_SHA}" ]]; then
+    echo "Error: remote tag ${VERSION_TAG} points to ${remote_tag_commit}, expected ${CURRENT_FULL_SHA}." >&2
+    exit 1
+  fi
+fi
+
+if [[ "${local_tag_exists}" != "true" ]]; then
+  git tag -a "${VERSION_TAG}" -m "Release ${VERSION_TAG}"
+fi
+
+if [[ "${remote_tag_exists}" != "true" ]]; then
+  git push "${TARGET_REMOTE}" "refs/tags/${VERSION_TAG}"
+fi
+
+if gh release view "${VERSION_TAG}" --repo "${TARGET_REPO}" >/dev/null 2>&1; then
+  echo "Release ${VERSION_TAG} already exists in ${TARGET_REPO}, reusing it."
+else
+  gh release create "${VERSION_TAG}" \
+    --repo "${TARGET_REPO}" \
+    --title "${VERSION_TAG}" \
+    --notes "${RELEASE_NOTES}" \
+    --verify-tag
+fi
+
+echo "Triggering GitHub Actions release workflow..."
+gh workflow run "release.yml" \
   --repo "${TARGET_REPO}" \
-  --title "${VERSION_TAG}" \
-  --notes "${RELEASE_NOTES}" \
-  --verify-tag
+  --ref "${TARGET_BRANCH}" \
+  -f "release_tag=${VERSION_TAG}"
 
 RAW_BASE="https://raw.githubusercontent.com/${TARGET_REPO}/${TARGET_BRANCH}"
 
