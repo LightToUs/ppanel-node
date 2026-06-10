@@ -7,7 +7,7 @@ plain='\033[0m'
 
 cur_dir=$(pwd)
 
-PPNODE_GITHUB_REPO="${PPNODE_GITHUB_REPO:-LightToUs/ppanel-node}"
+PPNODE_GITHUB_REPO="${PPNODE_GITHUB_REPO:-lighttous/ppanel-node}"
 PPNODE_GITHUB_BRANCH="${PPNODE_GITHUB_BRANCH:-main}"
 PPNODE_RAW_BASE="https://raw.githubusercontent.com/${PPNODE_GITHUB_REPO}/${PPNODE_GITHUB_BRANCH}"
 

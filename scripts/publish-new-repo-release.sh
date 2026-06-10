@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-TARGET_REPO="${TARGET_REPO:-LightToUs/ppanel-node}"
+TARGET_REPO="${TARGET_REPO:-lighttous/ppanel-node}"
 TARGET_BRANCH="${TARGET_BRANCH:-main}"
 TARGET_REMOTE="${TARGET_REMOTE:-lighttous}"
 ALLOW_DIRTY="${ALLOW_DIRTY:-false}"

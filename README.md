@@ -2,7 +2,7 @@
 ### 一键安装
 
 ```bash
-wget -N https://raw.githubusercontent.com/LightToUs/ppanel-node/main/scripts/install.sh && bash install.sh
+wget -N https://raw.githubusercontent.com/lighttous/ppanel-node/main/scripts/install.sh && bash install.sh
 ```
 
 ## 构建
