@@ -4,6 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches:
+      - main
       - master
       - develop
     paths:
@@ -20,6 +21,9 @@ on:
       - ".github/workflows/*.yml"
   release:
     types: [published]
+
+permissions:
+  contents: write
 
 jobs:
 
