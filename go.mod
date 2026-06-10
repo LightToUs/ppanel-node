@@ -1,4 +1,4 @@
-module github.com/perfect-panel/ppanel-node
+module github.com/lighttous/ppanel-node
 
 go 1.26.1
 

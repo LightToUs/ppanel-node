@@ -2,13 +2,12 @@ package node
 
 import (
 	"context"
-	"strconv"
 	"time"
 
-	"github.com/perfect-panel/ppanel-node/api/panel"
-	"github.com/perfect-panel/ppanel-node/common/serverstatus"
-	"github.com/perfect-panel/ppanel-node/common/task"
-	vCore "github.com/perfect-panel/ppanel-node/core"
+	"github.com/lighttous/ppanel-node/api/panel"
+	"github.com/lighttous/ppanel-node/common/serverstatus"
+	"github.com/lighttous/ppanel-node/common/task"
+	vCore "github.com/lighttous/ppanel-node/core"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -75,7 +74,6 @@ func (c *Controller) reloadTask() {
 	c.startTasks(c.info)
 }
 
-
 func (c *Controller) userListMonitor(ctx context.Context) (err error) {
 	// get user info
 	newU, err := c.apiClient.GetUserList(ctx)
@@ -104,7 +102,7 @@ func (c *Controller) userListMonitor(ctx context.Context) (err error) {
 	if newU == nil {
 		return nil
 	}
-	deleted, added := compareUserList(c.userList, newU)
+	deleted, added, updated := compareUserList(c.userList, newU)
 	if len(deleted) > 0 {
 		// have deleted users
 		err = c.server.DelUsers(deleted, c.tag, c.info)
@@ -131,9 +129,9 @@ func (c *Controller) userListMonitor(ctx context.Context) (err error) {
 			return nil
 		}
 	}
-	if len(added) > 0 || len(deleted) > 0 {
+	if len(added) > 0 || len(deleted) > 0 || len(updated) > 0 {
 		// update Limiter
-		c.limiter.UpdateUser(c.tag, added, deleted)
+		c.limiter.UpdateUser(c.tag, append(added, updated...), deleted)
 		if err != nil {
 			log.WithFields(log.Fields{
 				"tag": c.tag,
@@ -143,9 +141,9 @@ func (c *Controller) userListMonitor(ctx context.Context) (err error) {
 		}
 	}
 	c.userList = newU
-	if len(added)+len(deleted) != 0 {
+	if len(added)+len(deleted)+len(updated) != 0 {
 		log.WithField("节点", c.tag).
-			Infof("删除 %d 个用户，新增 %d 个用户", len(deleted), len(added))
+			Infof("删除 %d 个用户，新增 %d 个用户，更新 %d 个用户", len(deleted), len(added), len(updated))
 	}
 	return nil
 }
@@ -171,20 +169,8 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 	if onlineDevice, err := c.limiter.GetOnlineDevice(); err != nil {
 		log.Print(err)
 	} else if len(*onlineDevice) > 0 {
-		// Only report user has traffic > 100kb to allow ping test
-		var result []panel.OnlineUser
-		var nocountUID = make(map[int]struct{})
-		for _, traffic := range userTraffic {
-			total := traffic.Upload + traffic.Download
-			if total <= 0 {
-				nocountUID[traffic.UID] = struct{}{}
-			}
-		}
-		for _, online := range *onlineDevice {
-			if _, ok := nocountUID[online.UID]; !ok {
-				result = append(result, online)
-			}
-		}
+		// Only report users that produced traffic in the current reporting window.
+		result := filterReportedOnlineUsers(*onlineDevice, userTraffic)
 		if err = c.apiClient.ReportNodeOnlineUsers(ctx, &result); err != nil {
 			log.WithFields(log.Fields{
 				"tag": c.tag,
@@ -214,26 +200,49 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 	return nil
 }
 
-func compareUserList(old, new []panel.UserInfo) (deleted, added []panel.UserInfo) {
-	oldMap := make(map[string]int)
-	for i, user := range old {
-		key := user.Uuid + strconv.Itoa(user.SpeedLimit)
-		oldMap[key] = i
-	}
-
-	for _, user := range new {
-		key := user.Uuid + strconv.Itoa(user.SpeedLimit)
-		if _, exists := oldMap[key]; !exists {
-			added = append(added, user)
-		} else {
-			delete(oldMap, key)
+func filterReportedOnlineUsers(online []panel.OnlineUser, traffic []panel.UserTraffic) []panel.OnlineUser {
+	allowed := make(map[int]struct{}, len(traffic))
+	for _, item := range traffic {
+		if item.Upload+item.Download > 0 {
+			allowed[item.UID] = struct{}{}
 		}
 	}
-
-	for _, index := range oldMap {
-		deleted = append(deleted, old[index])
+	result := make([]panel.OnlineUser, 0, len(online))
+	for _, item := range online {
+		if _, ok := allowed[item.UID]; ok {
+			result = append(result, item)
+		}
 	}
-
-	return deleted, added
+	return result
 }
 
+func compareUserList(old, new []panel.UserInfo) (deleted, added, updated []panel.UserInfo) {
+	oldMap := make(map[string]panel.UserInfo, len(old))
+	for _, user := range old {
+		oldMap[user.Uuid] = user
+	}
+	seen := make(map[string]struct{}, len(new))
+	for _, user := range new {
+		oldUser, exists := oldMap[user.Uuid]
+		if !exists {
+			added = append(added, user)
+			continue
+		}
+		seen[user.Uuid] = struct{}{}
+		if !sameUserState(oldUser, user) {
+			updated = append(updated, user)
+		}
+	}
+	for _, user := range old {
+		if _, ok := seen[user.Uuid]; !ok {
+			deleted = append(deleted, user)
+		}
+	}
+	return deleted, added, updated
+}
+
+func sameUserState(oldUser, newUser panel.UserInfo) bool {
+	return oldUser.Id == newUser.Id &&
+		oldUser.SpeedLimit == newUser.SpeedLimit &&
+		oldUser.DeviceLimit == newUser.DeviceLimit
+}

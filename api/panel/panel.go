@@ -10,7 +10,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/go-resty/resty/v2"
-	"github.com/perfect-panel/ppanel-node/conf"
+	"github.com/lighttous/ppanel-node/conf"
 )
 
 type ClientV1 struct {

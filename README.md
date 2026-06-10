@@ -9,3 +9,10 @@ wget -N https://raw.githubusercontent.com/lighttous/ppanel-node/main/scripts/ins
 ``` bash
 GOEXPERIMENT=jsonv2 go build -v -o ./node -trimpath -ldflags "-s -w -buildid="
 ```
+
+## update
+``` bash
+git add .
+git commit -m "fix: more bug fixes"
+./scripts/publish-new-repo-release.sh v1.0.5
+```

@@ -5,11 +5,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/perfect-panel/ppanel-node/api/panel"
-	"github.com/perfect-panel/ppanel-node/common/task"
-	"github.com/perfect-panel/ppanel-node/conf"
-	"github.com/perfect-panel/ppanel-node/core/app/dispatcher"
-	_ "github.com/perfect-panel/ppanel-node/core/distro/all"
+	"github.com/lighttous/ppanel-node/api/panel"
+	"github.com/lighttous/ppanel-node/common/task"
+	"github.com/lighttous/ppanel-node/conf"
+	"github.com/lighttous/ppanel-node/core/app/dispatcher"
+	_ "github.com/lighttous/ppanel-node/core/distro/all"
 	log "github.com/sirupsen/logrus"
 	"github.com/xtls/xray-core/app/proxyman"
 	"github.com/xtls/xray-core/app/stats"
@@ -31,6 +31,7 @@ type AddUsersParams struct {
 type XrayCore struct {
 	Config                      *conf.Conf
 	Client                      *panel.ClientV2
+	ServerConfig                *panel.ServerConfigResponse
 	ReloadCh                    chan struct{}
 	serverConfigMonitorPeriodic *task.Task
 	access                      sync.Mutex
@@ -67,25 +68,33 @@ func (v *XrayCore) Start(serverconfig *panel.ServerConfigResponse) error {
 	v.ihm = v.Server.GetFeature(inbound.ManagerType()).(inbound.Manager)
 	v.ohm = v.Server.GetFeature(outbound.ManagerType()).(outbound.Manager)
 	v.dispatcher = v.Server.GetFeature(routing.DispatcherType()).(*dispatcher.DefaultDispatcher)
+	v.ServerConfig = serverconfig
 	v.startTasks(serverconfig)
 	return nil
 }
 
 func (v *XrayCore) Close() error {
+	if v == nil {
+		return nil
+	}
 	v.access.Lock()
 	defer v.access.Unlock()
 	if v.serverConfigMonitorPeriodic != nil {
 		v.serverConfigMonitorPeriodic.Close()
+		v.serverConfigMonitorPeriodic = nil
 	}
+	server := v.Server
 	v.Config = nil
+	v.Client = nil
+	v.ServerConfig = nil
 	v.ihm = nil
 	v.ohm = nil
 	v.dispatcher = nil
-	err := v.Server.Close()
-	if err != nil {
-		return err
+	v.Server = nil
+	if server == nil {
+		return nil
 	}
-	return nil
+	return server.Close()
 }
 
 func getCore(c *conf.Conf, serverconfig *panel.ServerConfigResponse) *core.Instance {

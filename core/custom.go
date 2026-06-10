@@ -6,7 +6,7 @@ import (
 	"net"
 	"strings"
 
-	"github.com/perfect-panel/ppanel-node/api/panel"
+	"github.com/lighttous/ppanel-node/api/panel"
 	"github.com/xtls/xray-core/app/dns"
 	"github.com/xtls/xray-core/app/router"
 	xnet "github.com/xtls/xray-core/common/net"

@@ -1,11 +1,12 @@
 package node
 
 import (
+	"errors"
 	"fmt"
 
-	"github.com/perfect-panel/ppanel-node/api/panel"
-	"github.com/perfect-panel/ppanel-node/conf"
-	vCore "github.com/perfect-panel/ppanel-node/core"
+	"github.com/lighttous/ppanel-node/api/panel"
+	"github.com/lighttous/ppanel-node/conf"
+	vCore "github.com/lighttous/ppanel-node/core"
 )
 
 type Node struct {
@@ -55,6 +56,9 @@ func (n *Node) Start() error {
 		}
 		err := n.controllers[i].Start()
 		if err != nil {
+			for j := 0; j < i; j++ {
+				_ = n.controllers[j].Close()
+			}
 			return fmt.Errorf("启动节点 [%s-%s-%d] 失败: %s",
 				n.controllers[i].apiClient.APIHost,
 				n.controllers[i].info.Type,
@@ -65,12 +69,19 @@ func (n *Node) Start() error {
 	return nil
 }
 
-func (n *Node) Close() {
+func (n *Node) Close() error {
+	if n == nil {
+		return nil
+	}
+	var closeErr error
 	for _, c := range n.controllers {
-		err := c.Close()
-		if err != nil {
-			panic(err)
+		if c == nil {
+			continue
+		}
+		if err := c.Close(); err != nil {
+			closeErr = errors.Join(closeErr, err)
 		}
 	}
 	n.controllers = nil
+	return closeErr
 }

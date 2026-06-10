@@ -5,10 +5,10 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/perfect-panel/ppanel-node/api/panel"
-	"github.com/perfect-panel/ppanel-node/common/task"
-	vCore "github.com/perfect-panel/ppanel-node/core"
-	"github.com/perfect-panel/ppanel-node/limiter"
+	"github.com/lighttous/ppanel-node/api/panel"
+	"github.com/lighttous/ppanel-node/common/task"
+	vCore "github.com/lighttous/ppanel-node/core"
+	"github.com/lighttous/ppanel-node/limiter"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -16,6 +16,7 @@ type Controller struct {
 	server                  *vCore.XrayCore
 	apiClient               *panel.ClientV1
 	tag                     string
+	started                 bool
 	limiter                 *limiter.Limiter
 	userList                []panel.UserInfo
 	aliveMap                map[int]int
@@ -38,7 +39,30 @@ func NewController(core *vCore.XrayCore, api *panel.ClientV1, info *panel.NodeIn
 
 // Start implement the Start() function of the service interface
 func (c *Controller) Start() error {
+	if c == nil || c.started {
+		return nil
+	}
 	var err error
+	var nodeAdded bool
+	var limiterAdded bool
+	defer func() {
+		if err == nil {
+			return
+		}
+		if nodeAdded && c.server != nil && c.tag != "" {
+			if closeErr := c.server.DelNode(c.tag); closeErr != nil {
+				log.WithFields(log.Fields{
+					"tag": c.tag,
+					"err": closeErr,
+				}).Error("Start rollback: remove node failed")
+			}
+		}
+		if limiterAdded && c.tag != "" {
+			limiter.DeleteLimiter(c.tag)
+		}
+		c.started = false
+	}()
+
 	// Update user
 	c.userList, err = c.apiClient.GetUserList(context.Background())
 	if err != nil {
@@ -56,6 +80,7 @@ func (c *Controller) Start() error {
 	// add limiter
 	l := limiter.AddLimiter(c.tag, c.userList, c.aliveMap)
 	c.limiter = l
+	limiterAdded = true
 
 	if c.info.Protocol.Security == "tls" {
 		err = c.requestCert()
@@ -68,6 +93,7 @@ func (c *Controller) Start() error {
 	if err != nil {
 		return fmt.Errorf("add new node error: %s", err)
 	}
+	nodeAdded = true
 	added, err := c.server.AddUsers(&vCore.AddUsersParams{
 		Tag:      c.tag,
 		Users:    c.userList,
@@ -78,25 +104,40 @@ func (c *Controller) Start() error {
 	}
 	log.WithField("节点", c.tag).Infof("已添加 %d 个新用户", added)
 	c.startTasks(c.info)
+	c.started = true
 	return nil
 }
 
 // Close implement the Close() function of the service interface
 func (c *Controller) Close() error {
-	limiter.DeleteLimiter(c.tag)
+	if c == nil {
+		return nil
+	}
 	if c.userListMonitorPeriodic != nil {
 		c.userListMonitorPeriodic.Close()
+		c.userListMonitorPeriodic = nil
 	}
 	if c.userReportPeriodic != nil {
 		c.userReportPeriodic.Close()
+		c.userReportPeriodic = nil
 	}
 	if c.renewCertPeriodic != nil {
 		c.renewCertPeriodic.Close()
+		c.renewCertPeriodic = nil
 	}
 	if c.onlineIpReportPeriodic != nil {
 		c.onlineIpReportPeriodic.Close()
+		c.onlineIpReportPeriodic = nil
+	}
+	if c.tag != "" {
+		limiter.DeleteLimiter(c.tag)
+	}
+	if !c.started || c.server == nil || c.tag == "" {
+		c.started = false
+		return nil
 	}
 	err := c.server.DelNode(c.tag)
+	c.started = false
 	if err != nil {
 		return fmt.Errorf("del node error: %s", err)
 	}

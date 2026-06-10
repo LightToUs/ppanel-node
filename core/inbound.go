@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/perfect-panel/ppanel-node/api/panel"
+	"github.com/lighttous/ppanel-node/api/panel"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/inbound"

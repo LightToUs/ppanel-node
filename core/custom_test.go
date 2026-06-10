@@ -3,7 +3,7 @@ package core
 import (
 	"testing"
 
-	"github.com/perfect-panel/ppanel-node/api/panel"
+	"github.com/lighttous/ppanel-node/api/panel"
 )
 
 func TestGetCustomConfigSkipsEmptyBlockRules(t *testing.T) {

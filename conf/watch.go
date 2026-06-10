@@ -9,6 +9,7 @@ import (
 )
 
 func (p *Conf) Watch(filePath string, reload func()) error {
+	_ = p
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return fmt.Errorf("new watcher error: %s", err)
@@ -28,12 +29,13 @@ func (p *Conf) Watch(filePath string, reload func()) error {
 				pre = time.Now()
 				go func() {
 					time.Sleep(5 * time.Second)
-					log.Println("config file changed, reloading...")
-					*p = *New()
-					err := p.LoadFromPath(filePath)
+					next := New()
+					err := next.LoadFromPath(filePath)
 					if err != nil {
 						log.Printf("reload config error: %s", err)
+						return
 					}
+					log.Println("config file changed, reloading...")
 					reload()
 					log.Println("reload config success")
 				}()

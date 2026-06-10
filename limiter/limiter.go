@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/juju/ratelimit"
-	"github.com/perfect-panel/ppanel-node/api/panel"
-	"github.com/perfect-panel/ppanel-node/common/format"
+	"github.com/lighttous/ppanel-node/api/panel"
+	"github.com/lighttous/ppanel-node/common/format"
 )
 
 var limitLock sync.RWMutex
@@ -82,7 +82,7 @@ func DeleteLimiter(tag string) {
 	limitLock.Unlock()
 }
 
-func (l *Limiter) UpdateUser(tag string, added []panel.UserInfo, deleted []panel.UserInfo) {
+func (l *Limiter) UpdateUser(tag string, upserts []panel.UserInfo, deleted []panel.UserInfo) {
 	for i := range deleted {
 		l.UserLimitInfo.Delete(format.UserTag(tag, deleted[i].Uuid))
 		l.UserOnlineIP.Delete(format.UserTag(tag, deleted[i].Uuid))
@@ -90,20 +90,29 @@ func (l *Limiter) UpdateUser(tag string, added []panel.UserInfo, deleted []panel
 		delete(l.UUIDtoUID, deleted[i].Uuid)
 		delete(l.AliveList, deleted[i].Id)
 	}
-	for i := range added {
-		userLimit := &UserLimitInfo{
-			UID: added[i].Id,
+	if l.AliveList == nil {
+		l.AliveList = make(map[int]int)
+	}
+	for i := range upserts {
+		tagUUID := format.UserTag(tag, upserts[i].Uuid)
+		if oldUID, ok := l.UUIDtoUID[upserts[i].Uuid]; ok && oldUID != upserts[i].Id {
+			delete(l.AliveList, oldUID)
 		}
-		if added[i].SpeedLimit != 0 {
-			userLimit.SpeedLimit = added[i].SpeedLimit
+		l.UserOnlineIP.Delete(tagUUID)
+		l.SpeedLimiter.Delete(tagUUID)
+		userLimit := &UserLimitInfo{
+			UID: upserts[i].Id,
+		}
+		if upserts[i].SpeedLimit != 0 {
+			userLimit.SpeedLimit = upserts[i].SpeedLimit
 			userLimit.ExpireTime = 0
 		}
-		if added[i].DeviceLimit != 0 {
-			userLimit.DeviceLimit = added[i].DeviceLimit
+		if upserts[i].DeviceLimit != 0 {
+			userLimit.DeviceLimit = upserts[i].DeviceLimit
 		}
 		userLimit.OverLimit = false
-		l.UserLimitInfo.Store(format.UserTag(tag, added[i].Uuid), userLimit)
-		l.UUIDtoUID[added[i].Uuid] = added[i].Id
+		l.UserLimitInfo.Store(tagUUID, userLimit)
+		l.UUIDtoUID[upserts[i].Uuid] = upserts[i].Id
 	}
 }
 
