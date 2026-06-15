@@ -168,16 +168,14 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 
 	if onlineDevice, err := c.limiter.GetOnlineDevice(); err != nil {
 		log.Print(err)
-	} else if len(*onlineDevice) > 0 {
-		// Only report users that produced traffic in the current reporting window.
-		result := filterReportedOnlineUsers(*onlineDevice, userTraffic)
-		if err = c.apiClient.ReportNodeOnlineUsers(ctx, &result); err != nil {
+	} else {
+		if err = c.apiClient.ReportNodeOnlineSnapshot(ctx, onlineDevice); err != nil {
 			log.WithFields(log.Fields{
 				"tag": c.tag,
 				"err": err,
-			}).Info("Report online users failed")
+			}).Info("Report online snapshot failed")
 		} else {
-			log.WithField("节点", c.tag).Infof("总计 %d 名在线用户, %d 名已上报", len(*onlineDevice), len(result))
+			log.WithField("节点", c.tag).Infof("已上报 %d 名在线用户快照", len(*onlineDevice))
 		}
 	}
 
@@ -198,22 +196,6 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 
 	userTraffic = nil
 	return nil
-}
-
-func filterReportedOnlineUsers(online []panel.OnlineUser, traffic []panel.UserTraffic) []panel.OnlineUser {
-	allowed := make(map[int]struct{}, len(traffic))
-	for _, item := range traffic {
-		if item.Upload+item.Download > 0 {
-			allowed[item.UID] = struct{}{}
-		}
-	}
-	result := make([]panel.OnlineUser, 0, len(online))
-	for _, item := range online {
-		if _, ok := allowed[item.UID]; ok {
-			result = append(result, item)
-		}
-	}
-	return result
 }
 
 func compareUserList(old, new []panel.UserInfo) (deleted, added, updated []panel.UserInfo) {

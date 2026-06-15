@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path"
+	"time"
 
 	"encoding/json/jsontext"
 	"encoding/json/v2"
@@ -27,6 +28,11 @@ type UserListBody struct {
 
 type UserOnlineBody struct {
 	Users []OnlineUser `json:"users"`
+}
+
+type UserOnlineSnapshotBody struct {
+	Users      []OnlineUser `json:"users"`
+	ReportedAt int64        `json:"reported_at"`
 }
 
 type AliveMap struct {
@@ -156,6 +162,28 @@ func (c *ClientV1) ReportNodeOnlineUsers(ctx context.Context, data *[]OnlineUser
 	const p = "/v1/server/online"
 	users := UserOnlineBody{
 		Users: *data,
+	}
+	r, err := c.Client.R().
+		SetContext(ctx).
+		SetBody(users).
+		ForceContentType("application/json").
+		Post(p)
+	if err != nil {
+		return fmt.Errorf("访问 %s 失败: %s", path.Join(c.APIHost+p), err)
+	}
+	if r.StatusCode() >= 400 {
+		body := r.Body()
+		return fmt.Errorf("访问 %s 失败: %s", path.Join(c.APIHost+p), string(body))
+	}
+
+	return nil
+}
+
+func (c *ClientV1) ReportNodeOnlineSnapshot(ctx context.Context, data *[]OnlineUser) error {
+	const p = "/v2/server/online/snapshot"
+	users := UserOnlineSnapshotBody{
+		Users:      *data,
+		ReportedAt: time.Now().UnixMilli(),
 	}
 	r, err := c.Client.R().
 		SetContext(ctx).

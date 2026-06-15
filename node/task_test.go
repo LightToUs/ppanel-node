@@ -27,20 +27,3 @@ func TestCompareUserListDetectsUpdatedUser(t *testing.T) {
 		t.Fatalf("updated = %#v, want u1 device_limit=3", updated)
 	}
 }
-
-func TestFilterReportedOnlineUsersOnlyKeepsUsersWithTraffic(t *testing.T) {
-	onlineUsers := []panel.OnlineUser{
-		{UID: 1, IP: "1.1.1.1"},
-		{UID: 2, IP: "2.2.2.2"},
-		{UID: 3, IP: "3.3.3.3"},
-	}
-	userTraffic := []panel.UserTraffic{
-		{UID: 1, Upload: 128, Download: 0},
-		{UID: 2, Upload: 0, Download: 0},
-	}
-
-	got := filterReportedOnlineUsers(onlineUsers, userTraffic)
-	if len(got) != 1 || got[0].UID != 1 {
-		t.Fatalf("filterReportedOnlineUsers() = %#v, want only UID 1", got)
-	}
-}

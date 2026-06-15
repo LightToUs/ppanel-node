@@ -138,6 +138,22 @@ gh workflow run "release.yml" \
   --repo "${TARGET_REPO}" \
   --ref "${TARGET_BRANCH}" \
   -f "release_tag=${VERSION_TAG}"
+echo "Workflow dispatched for ${VERSION_TAG}."
+echo "Release page: https://github.com/${TARGET_REPO}/releases/tag/${VERSION_TAG}"
+sleep 3
+latest_run_info="$(gh run list \
+  --repo "${TARGET_REPO}" \
+  --workflow "release.yml" \
+  --event workflow_dispatch \
+  --limit 1 \
+  --json databaseId,displayTitle,status,url \
+  --jq 'if length > 0 then .[0] else empty end' 2>/dev/null || true)"
+if [[ -n "${latest_run_info}" ]]; then
+  echo "Latest workflow run:"
+  echo "${latest_run_info}"
+else
+  echo "Latest workflow run is not visible yet. Check Actions manually in a few seconds."
+fi
 
 RAW_BASE="https://raw.githubusercontent.com/${TARGET_REPO}/${TARGET_BRANCH}"
 

@@ -1,0 +1,2 @@
+node:
+    ./scripts/publish-new-repo-release.sh v1.0.2
