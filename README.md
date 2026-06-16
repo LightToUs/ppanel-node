@@ -14,5 +14,5 @@ GOEXPERIMENT=jsonv2 go build -v -o ./node -trimpath -ldflags "-s -w -buildid="
 ``` bash
 git add .
 git commit -m "fix: more bug fixes"
-./scripts/publish-new-repo-release.sh v1.0.5
+./scripts/publish-new-repo-release.sh v1.2.1
 ```
