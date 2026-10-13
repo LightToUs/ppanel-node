@@ -20,6 +20,7 @@ type UserInfo struct {
 	Uuid        string `json:"uuid"`
 	SpeedLimit  int    `json:"speed_limit"`
 	DeviceLimit int    `json:"device_limit"`
+	Placeholder bool   `json:"placeholder"`
 }
 
 type UserListBody struct {
@@ -33,6 +34,18 @@ type UserOnlineBody struct {
 type UserOnlineSnapshotBody struct {
 	Users      []OnlineUser `json:"users"`
 	ReportedAt int64        `json:"reported_at"`
+}
+
+type AccessEvent struct {
+	EventID     string `json:"event_id"`
+	UID         int    `json:"uid"`
+	ClientIP    string `json:"client_ip"`
+	ConnectedAt int64  `json:"connected_at"`
+}
+
+type AccessEventBody struct {
+	Events     []AccessEvent `json:"events"`
+	ReportedAt int64         `json:"reported_at"`
 }
 
 type AliveMap struct {
@@ -120,7 +133,13 @@ func (c *ClientV1) GetUserAlive() (map[int]int, error) {
 }
 
 type ServerPushUserTrafficRequest struct {
+	BatchID string        `json:"batch_id,omitempty"`
 	Traffic []UserTraffic `json:"traffic"`
+}
+
+type serverPushUserTrafficResponse struct {
+	Code int    `json:"code"`
+	Msg  string `json:"msg"`
 }
 
 type UserTraffic struct {
@@ -129,7 +148,11 @@ type UserTraffic struct {
 	Download int64 `json:"download"`
 }
 
-func (c *ClientV1) ReportUserTraffic(ctx context.Context, userTraffic *[]UserTraffic) error {
+func (c *ClientV1) ReportUserTraffic(
+	ctx context.Context,
+	batchID string,
+	userTraffic *[]UserTraffic,
+) error {
 	traffic := make([]UserTraffic, 0)
 	for _, t := range *userTraffic {
 		traffic = append(traffic, UserTraffic{
@@ -140,6 +163,7 @@ func (c *ClientV1) ReportUserTraffic(ctx context.Context, userTraffic *[]UserTra
 	}
 	p := "/v1/server/push"
 	req := ServerPushUserTrafficRequest{
+		BatchID: batchID,
 		Traffic: traffic,
 	}
 	r, err := c.Client.R().
@@ -153,6 +177,15 @@ func (c *ClientV1) ReportUserTraffic(ctx context.Context, userTraffic *[]UserTra
 	if r.StatusCode() >= 400 {
 		body := r.Body()
 		return fmt.Errorf("访问 %s 失败: %s", path.Join(c.APIHost+p), string(body))
+	}
+	if len(r.Body()) > 0 {
+		var response serverPushUserTrafficResponse
+		if err = json.Unmarshal(r.Body(), &response); err != nil {
+			return fmt.Errorf("解析 %s 响应失败: %w", path.Join(c.APIHost+p), err)
+		}
+		if response.Code != 0 && response.Code != 200 {
+			return fmt.Errorf("访问 %s 失败: %s", path.Join(c.APIHost+p), response.Msg)
+		}
 	}
 
 	return nil
@@ -180,23 +213,24 @@ func (c *ClientV1) ReportNodeOnlineUsers(ctx context.Context, data *[]OnlineUser
 }
 
 func (c *ClientV1) ReportNodeOnlineSnapshot(ctx context.Context, data *[]OnlineUser) error {
-	const p = "/v2/server/online/snapshot"
-	users := UserOnlineSnapshotBody{
+	const p = "/v2/node/online/snapshot"
+	body := UserOnlineSnapshotBody{
 		Users:      *data,
 		ReportedAt: time.Now().UnixMilli(),
 	}
-	r, err := c.Client.R().
-		SetContext(ctx).
-		SetBody(users).
-		ForceContentType("application/json").
-		Post(p)
-	if err != nil {
-		return fmt.Errorf("访问 %s 失败: %s", path.Join(c.APIHost+p), err)
-	}
-	if r.StatusCode() >= 400 {
-		body := r.Body()
-		return fmt.Errorf("访问 %s 失败: %s", path.Join(c.APIHost+p), string(body))
-	}
+	_, err := c.postSignedJSON(ctx, p, body)
+	return err
+}
 
-	return nil
+func (c *ClientV1) ReportAccessEvents(ctx context.Context, events []AccessEvent) error {
+	if len(events) == 0 {
+		return nil
+	}
+	const p = "/v2/node/access/events"
+	body := AccessEventBody{
+		Events:     events,
+		ReportedAt: time.Now().UnixMilli(),
+	}
+	_, err := c.postSignedJSON(ctx, p, body)
+	return err
 }

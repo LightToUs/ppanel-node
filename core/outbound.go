@@ -13,12 +13,15 @@ func buildDefaultOutbound() (*core.OutboundHandlerConfig, error) {
 	outboundDetourConfig := &conf.OutboundDetourConfig{}
 	outboundDetourConfig.Protocol = "freedom"
 	outboundDetourConfig.Tag = "Default"
+	outboundDetourConfig.StreamSetting = &conf.StreamConfig{
+		SocketSettings: &conf.SocketConfig{
+			DomainStrategy: "UseIPv4v6",
+		},
+	}
 	//sendthrough := "origin"
 	//outboundDetourConfig.SendThrough = &sendthrough
 
-	proxySetting := &conf.FreedomConfig{
-		DomainStrategy: "UseIPv4v6",
-	}
+	proxySetting := &conf.FreedomConfig{}
 	var setting json.RawMessage
 	setting, err := json.Marshal(proxySetting)
 	if err != nil {

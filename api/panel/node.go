@@ -10,6 +10,9 @@ type NodeInfo struct {
 	Id                     int
 	Type                   string
 	PushInterval           int
+	AccessAuditEnabled     bool
+	PresenceMode           string
+	PresenceLeaseTTL       int
 	PullInterval           int
 	TrafficReportThreshold int
 	Protocol               *Protocol

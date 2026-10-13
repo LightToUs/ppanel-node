@@ -10,6 +10,8 @@ import (
 type ManagedWriter struct {
 	writer  buf.Writer
 	manager *LinkManager
+	onClose func()
+	once    sync.Once
 }
 
 func (w *ManagedWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
@@ -17,8 +19,15 @@ func (w *ManagedWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
 }
 
 func (w *ManagedWriter) Close() error {
-	w.manager.RemoveWriter(w)
-	return common.Close(w.writer)
+	var err error
+	w.once.Do(func() {
+		w.manager.RemoveWriter(w)
+		if w.onClose != nil {
+			w.onClose()
+		}
+		err = common.Close(w.writer)
+	})
+	return err
 }
 
 type LinkManager struct {
@@ -39,7 +48,13 @@ func (m *LinkManager) RemoveWriter(writer *ManagedWriter) {
 }
 
 func (m *LinkManager) CloseAll() {
-	for w, r := range m.links {
+	m.mu.Lock()
+	links := make(map[*ManagedWriter]buf.Reader, len(m.links))
+	for writer, reader := range m.links {
+		links[writer] = reader
+	}
+	m.mu.Unlock()
+	for w, r := range links {
 		common.Close(w)
 		common.Interrupt(r)
 	}

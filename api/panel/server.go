@@ -18,6 +18,9 @@ type Data struct {
 	TrafficReportThreshold int         `json:"traffic_report_threshold"`
 	PushInterval           int         `json:"push_interval"`
 	PullInterval           int         `json:"pull_interval"`
+	AccessAuditEnabled     bool        `json:"access_audit_enabled"`
+	PresenceMode           string      `json:"presence_mode"`
+	PresenceLeaseTTL       int         `json:"presence_lease_ttl"`
 	IPStrategy             string      `json:"ip_strategy"`
 	DNS                    *[]DNSItem  `json:"dns"`
 	Block                  *[]string   `json:"block"`

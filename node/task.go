@@ -30,6 +30,16 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 	log.WithField("节点", c.tag).Info("用户列表监控任务已启动")
 	_ = c.userReportPeriodic.Start(false)
 	log.WithField("节点", c.tag).Info("用户流量报告任务已启动")
+	if normalizedPresenceMode(node.PresenceMode) != "disabled" {
+		c.presenceRenewPeriodic = &task.Task{
+			Name:     "presenceRenew",
+			Interval: presenceLeaseTTL(node.PresenceLeaseTTL) / 3,
+			Execute:  c.refreshPresenceTask,
+			ReloadCh: c.server.ReloadCh,
+		}
+		_ = c.presenceRenewPeriodic.Start(false)
+		log.WithField("节点", c.tag).Info("在线租约续期任务已启动")
+	}
 	var security string
 	switch node.Type {
 	case "vless":
@@ -42,7 +52,7 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 		security = ""
 	case "tuic":
 		security = "tls"
-	case "hysteria", "hysteria2":
+	case "hysteria2", "hy2":
 		security = "tls"
 	default:
 		security = ""
@@ -71,7 +81,22 @@ func (c *Controller) reloadTask() {
 	if c.renewCertPeriodic != nil {
 		c.renewCertPeriodic.Close()
 	}
+	if c.presenceRenewPeriodic != nil {
+		c.presenceRenewPeriodic.Close()
+		c.presenceRenewPeriodic = nil
+	}
 	c.startTasks(c.info)
+}
+
+func (c *Controller) refreshPresenceTask(_ context.Context) error {
+	if c.limiter == nil {
+		return nil
+	}
+	for _, err := range c.limiter.RefreshPresence() {
+		log.WithFields(log.Fields{"tag": c.tag, "err": err}).
+			Warn("Refresh presence lease failed")
+	}
+	return nil
 }
 
 func (c *Controller) userListMonitor(ctx context.Context) (err error) {
@@ -149,22 +174,15 @@ func (c *Controller) userListMonitor(ctx context.Context) (err error) {
 }
 
 func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
+	// Access events use their own durable queue and are acknowledged only after a
+	// successful server response, so a traffic report failure cannot drop them.
+	c.reportAccessEvents(ctx)
+
 	var reportmin = 0
 	if c.info.TrafficReportThreshold > 0 {
 		reportmin = c.info.TrafficReportThreshold
 	}
-	userTraffic, _ := c.server.GetUserTrafficSlice(c.tag, reportmin)
-	if len(userTraffic) > 0 {
-		err = c.apiClient.ReportUserTraffic(ctx, &userTraffic)
-		if err != nil {
-			log.WithFields(log.Fields{
-				"tag": c.tag,
-				"err": err,
-			}).Info("Report user traffic failed")
-		} else {
-			log.WithField("节点", c.tag).Infof("已上报 %d 名用户消耗流量", len(userTraffic))
-		}
-	}
+	c.reportUserTraffic(ctx, reportmin)
 
 	if onlineDevice, err := c.limiter.GetOnlineDevice(); err != nil {
 		log.Print(err)
@@ -194,8 +212,58 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 		log.Print(err)
 	}
 
-	userTraffic = nil
 	return nil
+}
+
+func (c *Controller) reportUserTraffic(ctx context.Context, reportmin int) {
+	c.trafficReportMu.Lock()
+	defer c.trafficReportMu.Unlock()
+
+	trafficBatch := c.pendingTrafficBatch
+	if trafficBatch == nil {
+		var trafficErr error
+		trafficBatch, trafficErr = c.server.TakeUserTrafficBatchPersisted(
+			c.tag,
+			reportmin,
+			c.trafficBatches.Put,
+		)
+		if trafficErr != nil {
+			log.WithFields(log.Fields{
+				"tag": c.tag,
+				"err": trafficErr,
+			}).Info("Collect user traffic failed")
+		}
+	}
+	if trafficBatch != nil {
+		reportErr := c.apiClient.ReportUserTraffic(ctx, trafficBatch.BatchID, &trafficBatch.Traffic)
+		if reportErr != nil {
+			// Keep this exact batch and ID for retry. A lost HTTP response may
+			// mean the server already processed it, so rebuilding a new batch ID
+			// would allow duplicate accounting.
+			c.pendingTrafficBatch = trafficBatch
+			log.WithFields(log.Fields{
+				"tag":      c.tag,
+				"batch_id": trafficBatch.BatchID,
+				"err":      reportErr,
+			}).Info("Report user traffic failed")
+		} else {
+			if deleteErr := c.trafficBatches.Delete(trafficBatch.BatchID); deleteErr != nil {
+				c.pendingTrafficBatch = trafficBatch
+				log.WithFields(log.Fields{
+					"tag":      c.tag,
+					"batch_id": trafficBatch.BatchID,
+					"err":      deleteErr,
+				}).Error("Acknowledge traffic batch failed; batch retained for retry")
+				return
+			}
+			trafficBatch.Commit()
+			c.pendingTrafficBatch = nil
+			log.WithFields(log.Fields{
+				"节点":       c.tag,
+				"batch_id": trafficBatch.BatchID,
+			}).Infof("已上报 %d 名用户消耗流量", len(trafficBatch.Traffic))
+		}
+	}
 }
 
 func compareUserList(old, new []panel.UserInfo) (deleted, added, updated []panel.UserInfo) {

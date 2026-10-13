@@ -3,6 +3,7 @@ package node
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/lighttous/ppanel-node/api/panel"
 	"github.com/lighttous/ppanel-node/conf"
@@ -26,10 +27,14 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 		pullinterval = 60
 	}
 	for i, nodeconfig := range *serverconfig.Data.Protocols {
+		normalizeProtocolForRuntime(&nodeconfig)
 		n := &panel.NodeInfo{
 			Id:                     config.ApiConfig.ServerId,
 			Type:                   nodeconfig.Type,
 			TrafficReportThreshold: serverconfig.Data.TrafficReportThreshold,
+			AccessAuditEnabled:     serverconfig.Data.AccessAuditEnabled,
+			PresenceMode:           serverconfig.Data.PresenceMode,
+			PresenceLeaseTTL:       serverconfig.Data.PresenceLeaseTTL,
 			PushInterval:           pushinterval,
 			PullInterval:           pullinterval,
 			Protocol:               &nodeconfig,
@@ -43,10 +48,24 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 		if err != nil {
 			return nil, err
 		}
-		node.controllers[i] = NewController(core, p, n)
+		node.controllers[i] = NewController(core, p, n, config.StatePath)
 	}
 
 	return node, nil
+}
+
+func normalizeProtocolForRuntime(protocol *panel.Protocol) {
+	if protocol == nil {
+		return
+	}
+
+	switch strings.ToLower(strings.TrimSpace(protocol.Type)) {
+	case "hy2", "hysteria2":
+		protocol.Security = "tls"
+		if protocol.CertMode == "" || protocol.CertMode == "none" {
+			protocol.CertMode = "self"
+		}
+	}
 }
 
 func (n *Node) Start() error {

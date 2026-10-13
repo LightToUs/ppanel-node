@@ -40,11 +40,19 @@ type XrayCore struct {
 	ihm                         inbound.Manager
 	ohm                         outbound.Manager
 	dispatcher                  *dispatcher.DefaultDispatcher
+	trafficTakeMu               sync.Mutex
+	pendingTrafficMu            sync.Mutex
+	pendingTraffic              map[pendingTrafficKey]panel.UserTraffic
 }
 
 type UserMap struct {
 	uidMap  map[string]int
 	mapLock sync.RWMutex
+}
+
+type pendingTrafficKey struct {
+	tag string
+	uid int
 }
 
 func New(config *conf.Conf, client *panel.ClientV2) *XrayCore {

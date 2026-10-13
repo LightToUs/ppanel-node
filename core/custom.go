@@ -89,6 +89,9 @@ func normalizeOutboundProtocol(protocol string) string {
 		return "freedom"
 	case "reject", "block":
 		return "blackhole"
+	case "hysteria2", "hy2":
+		// Xray registers Hysteria 2 under the internal protocol name "hysteria".
+		return "hysteria"
 	default:
 		return strings.ToLower(strings.TrimSpace(protocol))
 	}

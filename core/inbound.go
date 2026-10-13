@@ -56,7 +56,7 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 		err = buildTrojan(nodeInfo, in)
 	case "shadowsocks":
 		err = buildShadowsocks(nodeInfo, in)
-	case "hysteria2", "hysteria":
+	case "hysteria2", "hy2":
 		err = buildHysteria2(nodeInfo, in)
 	case "tuic":
 		err = buildTuic(nodeInfo, in)
@@ -362,7 +362,7 @@ func buildHysteria2(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourCon
 			obfs_password = ""
 		}
 	}
-	if nodeInfo.Protocol.UpMbps > 0 || nodeInfo.Protocol.DownMbps > 0 {
+	if nodeInfo.Protocol.UpMbps > 0 {
 		finalmask.QuicParams = &coreConf.QuicParamsConfig{
 			Congestion: "force-brutal",
 			BrutalUp:   up,
@@ -370,11 +370,14 @@ func buildHysteria2(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourCon
 		}
 	}
 	if obfs != "" && obfs_password != "" {
-		rawobfsJSON := json.RawMessage(fmt.Sprintf(`{"password":"%s"}`, obfs_password))
+		rawobfsJSON, err := json.Marshal(map[string]string{"password": obfs_password})
+		if err != nil {
+			return fmt.Errorf("marshal hysteria2 obfs settings error: %s", err)
+		}
 		udp := []coreConf.Mask{
 			{
 				Type:     obfs,
-				Settings: &rawobfsJSON,
+				Settings: (*json.RawMessage)(&rawobfsJSON),
 			},
 		}
 		finalmask.Udp = udp

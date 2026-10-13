@@ -11,6 +11,7 @@ type Conf struct {
 	LogConfig LogConfig       `mapstructure:"Log"`
 	ApiConfig ServerApiConfig `mapstructure:"Api"`
 	PprofPort int             `mapstructure:"PprofPort"`
+	StatePath string          `mapstructure:"StatePath"`
 }
 
 type LogConfig struct {

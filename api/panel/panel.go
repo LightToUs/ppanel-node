@@ -14,14 +14,15 @@ import (
 )
 
 type ClientV1 struct {
-	Client    *resty.Client
-	APIHost   string
-	SecretKey string
-	NodeType  string
-	NodeId    int
-	userEtag  string
-	UserList  *UserListBody
-	AliveMap  *AliveMap
+	Client       *resty.Client
+	SignedClient *resty.Client
+	APIHost      string
+	SecretKey    string
+	NodeType     string
+	NodeId       int
+	userEtag     string
+	UserList     *UserListBody
+	AliveMap     *AliveMap
 }
 
 type ClientV2 struct {
@@ -48,6 +49,20 @@ func NewClientV1(c *conf.NodeApiConfig) (*ClientV1, error) {
 		}
 	})
 	client.SetBaseURL(c.APIHost)
+	signedClient := resty.New()
+	signedClient.SetRetryCount(0)
+	if c.Timeout > 0 {
+		signedClient.SetTimeout(time.Duration(c.Timeout) * time.Second)
+	} else {
+		signedClient.SetTimeout(30 * time.Second)
+	}
+	signedClient.OnError(func(req *resty.Request, err error) {
+		var v *resty.ResponseError
+		if errors.As(err, &v) {
+			logrus.Error(v.Err)
+		}
+	})
+	signedClient.SetBaseURL(c.APIHost)
 	// Check node type
 	c.NodeType = strings.ToLower(c.NodeType)
 	switch c.NodeType {
@@ -56,8 +71,8 @@ func NewClientV1(c *conf.NodeApiConfig) (*ClientV1, error) {
 		"trojan",
 		"shadowsocks",
 		"tuic",
-		"hysteria",
 		"hysteria2",
+		"hy2",
 		"anytls",
 		"vless":
 	default:
@@ -70,13 +85,14 @@ func NewClientV1(c *conf.NodeApiConfig) (*ClientV1, error) {
 		"secret_key": c.SecretKey,
 	})
 	return &ClientV1{
-		Client:    client,
-		SecretKey: c.SecretKey,
-		APIHost:   c.APIHost,
-		NodeType:  c.NodeType,
-		NodeId:    c.NodeID,
-		UserList:  &UserListBody{},
-		AliveMap:  &AliveMap{},
+		Client:       client,
+		SignedClient: signedClient,
+		SecretKey:    c.SecretKey,
+		APIHost:      c.APIHost,
+		NodeType:     c.NodeType,
+		NodeId:       c.NodeID,
+		UserList:     &UserListBody{},
+		AliveMap:     &AliveMap{},
 	}, nil
 }
 
