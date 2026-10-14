@@ -13,6 +13,11 @@ import (
 	"github.com/lighttous/ppanel-node/conf"
 )
 
+const (
+	nodeVersion      = "v1.2.2-reliable-20261013"
+	nodeCapabilities = "wireguard-inbound-v1,wg-user-schema-v1,wg-peer-identity-v1"
+)
+
 type ClientV1 struct {
 	Client       *resty.Client
 	SignedClient *resty.Client
@@ -49,6 +54,10 @@ func NewClientV1(c *conf.NodeApiConfig) (*ClientV1, error) {
 		}
 	})
 	client.SetBaseURL(c.APIHost)
+	client.SetHeaders(map[string]string{
+		"X-Node-Version":      nodeVersion,
+		"X-Node-Capabilities": nodeCapabilities,
+	})
 	signedClient := resty.New()
 	signedClient.SetRetryCount(0)
 	if c.Timeout > 0 {
@@ -63,6 +72,10 @@ func NewClientV1(c *conf.NodeApiConfig) (*ClientV1, error) {
 		}
 	})
 	signedClient.SetBaseURL(c.APIHost)
+	signedClient.SetHeaders(map[string]string{
+		"X-Node-Version":      nodeVersion,
+		"X-Node-Capabilities": nodeCapabilities,
+	})
 	// Check node type
 	c.NodeType = strings.ToLower(c.NodeType)
 	switch c.NodeType {
@@ -74,6 +87,7 @@ func NewClientV1(c *conf.NodeApiConfig) (*ClientV1, error) {
 		"hysteria2",
 		"hy2",
 		"anytls",
+		"wireguard",
 		"vless":
 	default:
 		return nil, fmt.Errorf("unsupported Node type: %s", c.NodeType)
@@ -111,6 +125,10 @@ func NewClientV2(c *conf.ServerApiConfig) *ClientV2 {
 		}
 	})
 	client.SetBaseURL(c.ApiHost)
+	client.SetHeaders(map[string]string{
+		"X-Node-Version":      nodeVersion,
+		"X-Node-Capabilities": nodeCapabilities,
+	})
 	client.SetQueryParams(map[string]string{
 		"secret_key": c.SecretKey,
 	})

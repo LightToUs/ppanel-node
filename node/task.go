@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	"github.com/lighttous/ppanel-node/api/panel"
@@ -120,7 +121,7 @@ func (c *Controller) userListMonitor(ctx context.Context) (err error) {
 	}
 	// update alive list
 	if newA != nil {
-		c.limiter.AliveList = newA
+		c.limiter.UpdateAliveList(newA)
 	}
 	// update user list
 	// newU == nil indicates 304 Not Modified; empty slice means the list is empty
@@ -128,31 +129,11 @@ func (c *Controller) userListMonitor(ctx context.Context) (err error) {
 		return nil
 	}
 	deleted, added, updated := compareUserList(c.userList, newU)
-	if len(deleted) > 0 {
-		// have deleted users
-		err = c.server.DelUsers(deleted, c.tag, c.info)
-		if err != nil {
-			log.WithFields(log.Fields{
-				"tag": c.tag,
-				"err": err,
-			}).Error("Delete users failed")
-			return nil
-		}
-	}
-	if len(added) > 0 {
-		// have added users
-		_, err = c.server.AddUsers(&vCore.AddUsersParams{
-			Tag:      c.tag,
-			NodeInfo: c.info,
-			Users:    added,
-		})
-		if err != nil {
-			log.WithFields(log.Fields{
-				"tag": c.tag,
-				"err": err,
-			}).Error("Add users failed")
-			return nil
-		}
+	if err = c.applyUserChanges(deleted, added, updated); err != nil {
+		c.apiClient.ResetUserETag()
+		log.WithFields(log.Fields{"tag": c.tag, "err": err}).
+			Error("Apply user changes failed; runtime changes rolled back")
+		return nil
 	}
 	if len(added) > 0 || len(deleted) > 0 || len(updated) > 0 {
 		// update Limiter
@@ -169,6 +150,64 @@ func (c *Controller) userListMonitor(ctx context.Context) (err error) {
 	if len(added)+len(deleted)+len(updated) != 0 {
 		log.WithField("节点", c.tag).
 			Infof("删除 %d 个用户，新增 %d 个用户，更新 %d 个用户", len(deleted), len(added), len(updated))
+	}
+	return nil
+}
+
+func (c *Controller) applyUserChanges(
+	deleted, added, updated []panel.UserInfo,
+) error {
+	rollbacks := make([]func() error, 0, len(deleted)+len(added)+len(updated)*2)
+	rollback := func(cause error) error {
+		for i := len(rollbacks) - 1; i >= 0; i-- {
+			if err := rollbacks[i](); err != nil {
+				log.WithFields(log.Fields{"tag": c.tag, "err": err}).
+					Error("Rollback user change failed")
+			}
+		}
+		return cause
+	}
+	addOne := func(user panel.UserInfo) error {
+		_, err := c.server.AddUsers(&vCore.AddUsersParams{
+			Tag: c.tag, NodeInfo: c.info, Users: []panel.UserInfo{user},
+		})
+		return err
+	}
+	deleteOne := func(user panel.UserInfo) error {
+		return c.server.DelUsers([]panel.UserInfo{user}, c.tag, c.info)
+	}
+	for _, user := range deleted {
+		if err := deleteOne(user); err != nil {
+			return rollback(err)
+		}
+		current := user
+		rollbacks = append(rollbacks, func() error { return addOne(current) })
+	}
+	for _, user := range added {
+		if err := addOne(user); err != nil {
+			return rollback(err)
+		}
+		current := user
+		rollbacks = append(rollbacks, func() error { return deleteOne(current) })
+	}
+	if c.info.Type == "wireguard" {
+		oldByUUID := make(map[string]panel.UserInfo, len(c.userList))
+		for _, user := range c.userList {
+			oldByUUID[user.Uuid] = user
+		}
+		for _, user := range updated {
+			oldUser := oldByUUID[user.Uuid]
+			if err := deleteOne(oldUser); err != nil {
+				return rollback(err)
+			}
+			oldCopy := oldUser
+			rollbacks = append(rollbacks, func() error { return addOne(oldCopy) })
+			if err := addOne(user); err != nil {
+				return rollback(err)
+			}
+			newCopy := user
+			rollbacks = append(rollbacks, func() error { return deleteOne(newCopy) })
+		}
 	}
 	return nil
 }
@@ -294,5 +333,11 @@ func compareUserList(old, new []panel.UserInfo) (deleted, added, updated []panel
 func sameUserState(oldUser, newUser panel.UserInfo) bool {
 	return oldUser.Id == newUser.Id &&
 		oldUser.SpeedLimit == newUser.SpeedLimit &&
-		oldUser.DeviceLimit == newUser.DeviceLimit
+		oldUser.DeviceLimit == newUser.DeviceLimit &&
+		oldUser.Placeholder == newUser.Placeholder &&
+		oldUser.PeerId == newUser.PeerId &&
+		oldUser.PublicKey == newUser.PublicKey &&
+		slices.Equal(oldUser.AllowedIPs, newUser.AllowedIPs) &&
+		oldUser.PreSharedKey == newUser.PreSharedKey &&
+		oldUser.PersistentKeepalive == newUser.PersistentKeepalive
 }

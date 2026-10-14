@@ -11,16 +11,23 @@ import (
 )
 
 type OnlineUser struct {
-	UID int
-	IP  string
+	UID      int    `json:"uid"`
+	IP       string `json:"ip,omitempty"`
+	PeerID   string `json:"peer_id,omitempty"`
+	TunnelIP string `json:"tunnel_ip,omitempty"`
 }
 
 type UserInfo struct {
-	Id          int    `json:"id"`
-	Uuid        string `json:"uuid"`
-	SpeedLimit  int    `json:"speed_limit"`
-	DeviceLimit int    `json:"device_limit"`
-	Placeholder bool   `json:"placeholder"`
+	Id                  int      `json:"id"`
+	Uuid                string   `json:"uuid"`
+	SpeedLimit          int      `json:"speed_limit"`
+	DeviceLimit         int      `json:"device_limit"`
+	Placeholder         bool     `json:"placeholder"`
+	PeerId              string   `json:"peer_id"`
+	PublicKey           string   `json:"public_key"`
+	AllowedIPs          []string `json:"allowed_ips"`
+	PreSharedKey        string   `json:"pre_shared_key"`
+	PersistentKeepalive int      `json:"persistent_keepalive"`
 }
 
 type UserListBody struct {
@@ -37,10 +44,13 @@ type UserOnlineSnapshotBody struct {
 }
 
 type AccessEvent struct {
-	EventID     string `json:"event_id"`
-	UID         int    `json:"uid"`
-	ClientIP    string `json:"client_ip"`
-	ConnectedAt int64  `json:"connected_at"`
+	EventID      string `json:"event_id"`
+	UID          int    `json:"uid"`
+	ClientIP     string `json:"client_ip,omitempty"`
+	PeerID       string `json:"peer_id,omitempty"`
+	TunnelIP     string `json:"tunnel_ip,omitempty"`
+	EndpointPort int    `json:"endpoint_port,omitempty"`
+	ConnectedAt  int64  `json:"connected_at"`
 }
 
 type AccessEventBody struct {
@@ -76,7 +86,9 @@ func (c *ClientV1) GetUserList(ctx context.Context) ([]UserInfo, error) {
 		body := r.Body()
 		return nil, fmt.Errorf("访问 %s 失败: %s", path.Join(c.APIHost+p), string(body))
 	}
-	userlist := &UserListBody{}
+	userlist := &UserListBody{
+		Users: make([]UserInfo, 0),
+	}
 	dec := jsontext.NewDecoder(r.RawResponse.Body)
 	for {
 		tok, err := dec.ReadToken()
@@ -107,6 +119,10 @@ func (c *ClientV1) GetUserList(ctx context.Context) ([]UserInfo, error) {
 	}
 	c.userEtag = r.Header().Get("ETag")
 	return userlist.Users, nil
+}
+
+func (c *ClientV1) ResetUserETag() {
+	c.userEtag = ""
 }
 
 func (c *ClientV1) GetUserAlive() (map[int]int, error) {

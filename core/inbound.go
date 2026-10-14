@@ -62,6 +62,8 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 		err = buildTuic(nodeInfo, in)
 	case "anytls":
 		err = buildAnyTLS(nodeInfo, in)
+	case "wireguard":
+		err = buildWireGuard(nodeInfo, in)
 	default:
 		return nil, fmt.Errorf("unsupported node type: %s", nodeInfo.Type)
 	}
@@ -80,6 +82,10 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 	// Set Listen IP address
 	ipAddress := net.ParseAddress("0.0.0.0")
 	in.ListenOn = &coreConf.Address{Address: ipAddress}
+	in.Tag = tag
+	if nodeInfo.Type == "wireguard" {
+		return in.Build()
+	}
 	// Set SniffingConfig
 	sniffingConfig := &coreConf.SniffingConfig{
 		Enabled:      true,
@@ -136,8 +142,49 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 	default:
 		break
 	}
-	in.Tag = tag
 	return in.Build()
+}
+
+func buildWireGuard(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig) error {
+	protocol := nodeInfo.Protocol
+	if protocol.WireGuardServerPrivateKey == "" {
+		return errors.New("wireguard server private key is empty")
+	}
+
+	addresses := make([]string, 0, 2)
+	if protocol.WireGuardIPv4CIDR != "" {
+		addresses = append(addresses, protocol.WireGuardIPv4CIDR)
+	}
+	if protocol.WireGuardIPv6CIDR != "" {
+		addresses = append(addresses, protocol.WireGuardIPv6CIDR)
+	}
+	if len(addresses) == 0 {
+		return errors.New("wireguard interface address is empty")
+	}
+
+	reserved := make([]byte, len(protocol.WireGuardReserved))
+	for i, value := range protocol.WireGuardReserved {
+		if value < 0 || value > 255 {
+			return fmt.Errorf("wireguard reserved byte %d is out of range", value)
+		}
+		reserved[i] = byte(value)
+	}
+	settings := &coreConf.WireGuardConfig{
+		IsClient:    false,
+		NoKernelTun: true,
+		SecretKey:   protocol.WireGuardServerPrivateKey,
+		Address:     addresses,
+		MTU:         int32(protocol.WireGuardMTU),
+		Reserved:    reserved,
+		DNS:         protocol.WireGuardDNS,
+	}
+	encoded, err := json.Marshal(settings)
+	if err != nil {
+		return fmt.Errorf("marshal wireguard config: %w", err)
+	}
+	inbound.Protocol = "wireguard"
+	inbound.Settings = (*json.RawMessage)(&encoded)
+	return nil
 }
 
 func buildVLess(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig) error {

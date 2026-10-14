@@ -105,7 +105,7 @@ func (c *Controller) Start() error {
 	if err != nil {
 		return fmt.Errorf("get user list error: %s", err)
 	}
-	if len(c.userList) == 0 {
+	if len(c.userList) == 0 && c.info.Type != "wireguard" {
 		return errors.New("add users error: not have any user")
 	}
 	c.aliveMap, err = c.apiClient.GetUserAlive()

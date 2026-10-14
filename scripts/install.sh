@@ -1,4 +1,5 @@
 #!/bin/bash
+set -o pipefail
 
 red='\033[0;31m'
 green='\033[0;32m'
@@ -56,8 +57,11 @@ parse_args() {
                 SERVER_ID_ARG="$2"; shift 2 ;;
             --secret-key)
                 SECRET_KEY_ARG="$2"; shift 2 ;;
+            --secret-key-stdin)
+                IFS= read -r SECRET_KEY_ARG
+                shift ;;
             -h|--help)
-                echo "用法: $0 [版本号] [--api-host URL] [--server-id ID] [--secret-key KEY]"
+                echo "用法: $0 [版本号] [--api-host URL] [--server-id ID] [--secret-key-stdin]"
                 exit 0 ;;
             --*)
                 echo "未知参数: $1"; exit 1 ;;
@@ -227,6 +231,8 @@ generate_ppnode_config() {
         local api_host="$1"
         local server_id="$2"
         local secret_key="$3"
+        local escaped_secret_key
+        escaped_secret_key="${secret_key//\'/\'\'}"
 
         mkdir -p /etc/PPanel-node >/dev/null 2>&1
         cat > /etc/PPanel-node/config.yml <<EOF
@@ -244,7 +250,7 @@ Api:
   # 服务器唯一标识
   ServerID: ${server_id}
   # 通讯密钥，用于验证请求合法性
-  SecretKey: ${secret_key}
+  SecretKey: '${escaped_secret_key}'
   # 请求超时时间（单位：秒）
   Timeout: 30
 EOF
@@ -255,49 +261,96 @@ EOF
             systemctl restart PPanel-node
         fi
         sleep 2
-        check_status
-        echo -e ""
-        if [[ $? == 0 ]]; then
+        if check_status; then
+            echo -e ""
             echo -e "${green}PPanel-node 重启成功${plain}"
         else
             echo -e "${red}PPanel-node 可能启动失败，请使用 ppnode log 查看日志信息${plain}"
+            return 1
         fi
 }
 
 install_ppnode() {
     local version_param="$1"
-    if [[ -e /usr/local/PPanel-node/ ]]; then
-        rm -rf /usr/local/PPanel-node/
+    local install_dir="/usr/local/PPanel-node"
+    local backup_dir="/usr/local/PPanel-node.previous"
+    local staging_dir
+    staging_dir="$(mktemp -d /usr/local/PPanel-node.new.XXXXXX)"
+    local config_backup=""
+    if [[ -f /etc/PPanel-node/config.yml ]]; then
+        config_backup="$(mktemp /tmp/ppanel-node-config.XXXXXX)"
+        cp /etc/PPanel-node/config.yml "$config_backup"
     fi
-
-    mkdir /usr/local/PPanel-node/ -p
-    cd /usr/local/PPanel-node/
+    restore_previous_install() {
+        if [[ -d "$backup_dir" ]]; then
+            rm -rf "$install_dir"
+            mv "$backup_dir" "$install_dir"
+        fi
+        if [[ -n "$config_backup" ]]; then
+            cp "$config_backup" /etc/PPanel-node/config.yml
+        fi
+        if [[ x"${release}" == x"alpine" ]]; then
+            service PPanel-node restart >/dev/null 2>&1 || true
+        else
+            systemctl restart PPanel-node >/dev/null 2>&1 || true
+        fi
+    }
 
     if  [[ -z "$version_param" ]] ; then
-        last_version=$(curl -Ls "${PPNODE_RELEASE_API}" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+        last_version=$(curl -fsSL "${PPNODE_RELEASE_API}" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
         if [[ ! -n "$last_version" ]]; then
             echo -e "${red}检测 PPanel-node 版本失败，可能是超出 Github API 限制，请稍后再试，或手动指定 PPanel-node 版本安装${plain}"
+            rm -rf "$staging_dir"
             exit 1
         fi
         echo -e "${green}检测到最新版本：${last_version}，开始安装...${plain}"
         url="${PPNODE_RELEASE_BASE}/${last_version}/ppanel-node-linux-${arch}.zip"
-        curl -sL "$url" | pv -s 30M -W -N "下载进度" > /usr/local/PPanel-node/ppanel-node-linux.zip
-        if [[ $? -ne 0 ]]; then
-            echo -e "${red}下载 PPanel-node 失败，请确保你的服务器能够下载 ${PPNODE_GITHUB_REPO} 的 Github Release 文件${plain}"
-            exit 1
-        fi
     else
-    last_version=$version_param
+        last_version=$version_param
         url="${PPNODE_RELEASE_BASE}/${last_version}/ppanel-node-linux-${arch}.zip"
-        curl -sL "$url" | pv -s 30M -W -N "下载进度" > /usr/local/PPanel-node/ppanel-node-linux.zip
-        if [[ $? -ne 0 ]]; then
-            echo -e "${red}下载 PPanel-node $1 失败，请确保此版本存在${plain}"
-            exit 1
-        fi
     fi
 
-    unzip ppanel-node-linux.zip
-    rm ppanel-node-linux.zip -f
+    if ! curl -fL "$url" | pv -s 30M -W -N "下载进度" > "$staging_dir/ppanel-node-linux.zip"; then
+        echo -e "${red}下载 PPanel-node ${last_version} 失败${plain}"
+        rm -rf "$staging_dir"
+        exit 1
+    fi
+    if ! curl -fsSL "${url}.dgst" -o "$staging_dir/ppanel-node-linux.zip.dgst"; then
+        echo -e "${red}下载 PPanel-node 校验和失败${plain}"
+        rm -rf "$staging_dir"
+        exit 1
+    fi
+    expected_sha256="$(awk 'toupper($0) ~ /SHA2?-?256/ {print $NF; exit}' "$staging_dir/ppanel-node-linux.zip.dgst")"
+    actual_sha256="$(sha256sum "$staging_dir/ppanel-node-linux.zip" | awk '{print $1}')"
+    if [[ -z "$expected_sha256" || "${actual_sha256,,}" != "${expected_sha256,,}" ]]; then
+        echo -e "${red}PPanel-node 安装包 SHA-256 校验失败${plain}"
+        rm -rf "$staging_dir"
+        exit 1
+    fi
+    rm -f "$staging_dir/ppanel-node-linux.zip.dgst"
+    if ! unzip -tq "$staging_dir/ppanel-node-linux.zip" >/dev/null ||
+       ! unzip -q "$staging_dir/ppanel-node-linux.zip" -d "$staging_dir"; then
+        echo -e "${red}PPanel-node 安装包校验或解压失败${plain}"
+        rm -rf "$staging_dir"
+        exit 1
+    fi
+    rm -f "$staging_dir/ppanel-node-linux.zip"
+    if [[ ! -f "$staging_dir/ppnode" ]]; then
+        echo -e "${red}PPanel-node 安装包缺少 ppnode 可执行文件${plain}"
+        rm -rf "$staging_dir"
+        exit 1
+    fi
+    if [[ x"${release}" == x"alpine" ]]; then
+        service PPanel-node stop >/dev/null 2>&1 || true
+    else
+        systemctl stop PPanel-node >/dev/null 2>&1 || true
+    fi
+    rm -rf "$backup_dir"
+    if [[ -d "$install_dir" ]]; then
+        mv "$install_dir" "$backup_dir"
+    fi
+    mv "$staging_dir" "$install_dir"
+    cd "$install_dir"
     chmod +x ppnode
     mkdir /etc/PPanel-node/ -p
     cp geoip.dat /etc/PPanel-node/
@@ -357,7 +410,11 @@ EOF
     if [[ ! -f /etc/PPanel-node/config.yml ]]; then
         # 如果通过 CLI 传入了完整参数，则直接生成配置并跳过交互
         if [[ -n "$API_HOST_ARG" && -n "$SERVER_ID_ARG" && -n "$SECRET_KEY_ARG" ]]; then
-            generate_ppnode_config "$API_HOST_ARG" "$SERVER_ID_ARG" "$SECRET_KEY_ARG"
+            if ! generate_ppnode_config "$API_HOST_ARG" "$SERVER_ID_ARG" "$SECRET_KEY_ARG"; then
+                restore_previous_install
+                rm -f "$config_backup"
+                exit 1
+            fi
             echo -e "${green}已根据参数生成 /etc/PPanel-node/config.yml${plain}"
             first_install=false
         else
@@ -371,12 +428,14 @@ EOF
             systemctl start PPanel-node
         fi
         sleep 2
-        check_status
-        echo -e ""
-        if [[ $? == 0 ]]; then
+        if check_status; then
+            echo -e ""
             echo -e "${green}PPanel-node 重启成功${plain}"
         else
-            echo -e "${red}PPanel-node 可能启动失败，请使用 ppnode log 查看日志信息${plain}"
+            echo -e "${red}PPanel-node 启动失败，正在恢复上一版本${plain}"
+            restore_previous_install
+            rm -f "$config_backup"
+            exit 1
         fi
         first_install=false
     fi
@@ -386,6 +445,7 @@ EOF
     chmod +x /usr/bin/ppnode
 
     cd $cur_dir
+    rm -f "$config_backup"
     rm -f install.sh
     echo "------------------------------------------"
     echo "PPanel-node 管理脚本使用方法: "

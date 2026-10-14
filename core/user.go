@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -255,9 +256,6 @@ func (vc *XrayCore) GetUserTrafficSlice(tag string, mintraffic int) ([]panel.Use
 func (v *XrayCore) AddUsers(p *AddUsersParams) (added int, err error) {
 	v.users.mapLock.Lock()
 	defer v.users.mapLock.Unlock()
-	for i := range p.Users {
-		v.users.uidMap[format.UserTag(p.Tag, p.Users[i].Uuid)] = p.Users[i].Id
-	}
 	var users []*protocol.User
 	switch p.NodeInfo.Type {
 	case "vmess":
@@ -277,6 +275,11 @@ func (v *XrayCore) AddUsers(p *AddUsersParams) (added int, err error) {
 		users = buildTuicUsers(p.Tag, p.Users)
 	case "anytls":
 		users = buildAnyTLSUsers(p.Tag, p.Users)
+	case "wireguard":
+		users, err = buildWireGuardUsers(p.Tag, p.Users)
+		if err != nil {
+			return 0, err
+		}
 	default:
 		return 0, fmt.Errorf("unsupported node type: %s", p.NodeInfo.Type)
 	}
@@ -293,10 +296,50 @@ func (v *XrayCore) AddUsers(p *AddUsersParams) (added int, err error) {
 		err = man.AddUser(ctx, mUser)
 		cancel()
 		if err != nil {
-			return 0, err
+			return added, err
 		}
+		v.users.uidMap[u.Email] = p.Users[added].Id
+		added++
 	}
-	return len(users), nil
+	return added, nil
+}
+
+func buildWireGuardUsers(tag string, userInfo []panel.UserInfo) ([]*protocol.User, error) {
+	users := make([]*protocol.User, 0, len(userInfo))
+	for i := range userInfo {
+		peer, err := buildWireGuardUser(tag, &userInfo[i])
+		if err != nil {
+			return nil, fmt.Errorf("build wireguard peer %q: %w", userInfo[i].PeerId, err)
+		}
+		users = append(users, peer)
+	}
+	return users, nil
+}
+
+func buildWireGuardUser(tag string, userInfo *panel.UserInfo) (*protocol.User, error) {
+	if userInfo.PublicKey == "" {
+		return nil, errors.New("public key is empty")
+	}
+	if len(userInfo.AllowedIPs) == 0 {
+		return nil, errors.New("allowed IPs are empty")
+	}
+	if userInfo.PersistentKeepalive < 0 {
+		return nil, errors.New("persistent keepalive must not be negative")
+	}
+	account, err := (&conf.WireGuardPeerConfig{
+		PublicKey:    userInfo.PublicKey,
+		PreSharedKey: userInfo.PreSharedKey,
+		KeepAlive:    uint32(userInfo.PersistentKeepalive),
+		AllowedIPs:   userInfo.AllowedIPs,
+	}).Build()
+	if err != nil {
+		return nil, err
+	}
+	return &protocol.User{
+		Level:   0,
+		Email:   format.UserTag(tag, userInfo.Uuid),
+		Account: serial.ToTypedMessage(account),
+	}, nil
 }
 
 func buildVmessUsers(tag string, userInfo []panel.UserInfo) (users []*protocol.User) {

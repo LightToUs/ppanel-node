@@ -30,6 +30,7 @@ type Limiter struct {
 	SpeedLimiter  *sync.Map      // key: TagUUID, value: *ratelimit.Bucket
 	AliveList     map[int]int    // Key: Uid, value: alive_ip
 
+	usersMu          sync.RWMutex
 	accessMu         sync.Mutex
 	accessLastSeen   map[string]time.Time
 	accessIdleWindow time.Duration
@@ -64,6 +65,8 @@ type presenceActiveEntry struct {
 type onlineDeviceEntry struct {
 	uid      int
 	ip       string
+	peerID   string
+	tunnelIP string
 	lastSeen time.Time
 }
 
@@ -129,6 +132,8 @@ func DeleteLimiter(tag string) {
 }
 
 func (l *Limiter) UpdateUser(tag string, upserts []panel.UserInfo, deleted []panel.UserInfo) {
+	l.usersMu.Lock()
+	defer l.usersMu.Unlock()
 	for i := range deleted {
 		l.UserLimitInfo.Delete(format.UserTag(tag, deleted[i].Uuid))
 		l.UserOnlineIP.Delete(format.UserTag(tag, deleted[i].Uuid))
@@ -163,6 +168,12 @@ func (l *Limiter) UpdateUser(tag string, upserts []panel.UserInfo, deleted []pan
 		l.UserLimitInfo.Store(tagUUID, userLimit)
 		l.UUIDtoUID[upserts[i].Uuid] = upserts[i].Id
 	}
+}
+
+func (l *Limiter) UpdateAliveList(aliveList map[int]int) {
+	l.usersMu.Lock()
+	l.AliveList = aliveList
+	l.usersMu.Unlock()
 }
 
 func (l *Limiter) SetAccessRecorder(recorder func(panel.AccessEvent) error, idleWindow time.Duration) {
@@ -202,6 +213,11 @@ func (l *Limiter) SetPresenceAuthorizer(
 func (l *Limiter) CheckLimit(taguuid string, ip string, isTcp bool, noSSUDP bool) (Bucket *ratelimit.Bucket, Reject bool) {
 	// check if ipv4 mapped ipv6
 	ip = strings.TrimPrefix(ip, "::ffff:")
+	peerID := wireGuardPeerID(taguuid)
+	deviceKey := ip
+	if peerID != "" {
+		deviceKey = "peer:" + peerID
+	}
 
 	// check and gen speed limit Bucket
 	nodeLimit := l.SpeedLimit
@@ -229,29 +245,31 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, isTcp bool, noSSUDP bool
 		return nil, true
 	}
 	now := time.Now()
-	if !placeholder && !l.authorizePresence(uid, ip, now) {
+	if !placeholder && !l.authorizePresence(uid, deviceKey, now) {
 		return nil, true
 	}
 	if noSSUDP {
 		// Store online user for device limit
 		ipMap := new(sync.Map)
-		ipMap.Store(ip, uid)
+		ipMap.Store(deviceKey, uid)
+		l.usersMu.RLock()
 		aliveIp := l.AliveList[uid]
+		l.usersMu.RUnlock()
 		// If any device is online
 		if v, ok := l.UserOnlineIP.LoadOrStore(taguuid, ipMap); ok {
 			ipMap := v.(*sync.Map)
 			// If this is a new ip
-			if _, ok := ipMap.LoadOrStore(ip, uid); !ok {
+			if _, ok := ipMap.LoadOrStore(deviceKey, uid); !ok {
 				if deviceLimit > 0 {
 					if deviceLimit <= aliveIp {
-						ipMap.Delete(ip)
+						ipMap.Delete(deviceKey)
 						return nil, true
 					}
 				}
 			}
-		} else if v, ok := l.OldUserOnline.Load(ip); ok {
+		} else if v, ok := l.OldUserOnline.Load(deviceKey); ok {
 			if v.(int) == uid {
-				l.OldUserOnline.Delete(ip)
+				l.OldUserOnline.Delete(deviceKey)
 			}
 		} else {
 			if deviceLimit > 0 {
@@ -265,8 +283,8 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, isTcp bool, noSSUDP bool
 	if !placeholder {
 		// Online visibility is protocol-independent. In particular, authenticated
 		// HY2 sessions arrive over UDP and must not be excluded by noSSUDP.
-		l.markOnline(uid, ip, now)
-		l.recordAccess(uid, ip, now)
+		l.markOnline(uid, deviceKey, peerID, ip, now)
+		l.recordAccess(uid, peerID, ip, now)
 	}
 
 	limit := int64(determineSpeedLimit(nodeLimit, userLimit)) * 1000000 / 8 // If you need the Speed limit
@@ -293,7 +311,11 @@ func (l *Limiter) TrackPresence(taguuid string, ip string) func() {
 		return func() {}
 	}
 	ip = strings.TrimPrefix(ip, "::ffff:")
-	key := fmt.Sprintf("%d\x00%s", info.UID, ip)
+	deviceKey := ip
+	if peerID := wireGuardPeerID(taguuid); peerID != "" {
+		deviceKey = "peer:" + peerID
+	}
+	key := fmt.Sprintf("%d\x00%s", info.UID, deviceKey)
 	l.presenceMu.Lock()
 	if l.presenceMode == "" || l.presenceMode == "disabled" || l.presenceAuthorizer == nil {
 		l.presenceMu.Unlock()
@@ -301,7 +323,7 @@ func (l *Limiter) TrackPresence(taguuid string, ip string) func() {
 	}
 	active := l.presenceActive[key]
 	active.uid = info.UID
-	active.ip = ip
+	active.ip = deviceKey
 	active.refs++
 	l.presenceActive[key] = active
 	l.presenceMu.Unlock()
@@ -399,7 +421,7 @@ func (l *Limiter) authorizePresence(uid int, ip string, now time.Time) bool {
 	return allowed
 }
 
-func (l *Limiter) recordAccess(uid int, ip string, now time.Time) {
+func (l *Limiter) recordAccess(uid int, peerID, tunnelIP string, now time.Time) {
 	l.accessMu.Lock()
 	recorder := l.accessRecorder
 	if recorder == nil {
@@ -414,7 +436,13 @@ func (l *Limiter) recordAccess(uid int, ip string, now time.Time) {
 		}
 		l.accessCleanupAt = now.Add(l.accessIdleWindow)
 	}
-	key := fmt.Sprintf("%d\x00%s", uid, ip)
+	clientIP := tunnelIP
+	deviceKey := tunnelIP
+	if peerID != "" {
+		clientIP = ""
+		deviceKey = "peer:" + peerID
+	}
+	key := fmt.Sprintf("%d\x00%s", uid, deviceKey)
 	previous, exists := l.accessLastSeen[key]
 	l.accessLastSeen[key] = now
 	if exists && now.Sub(previous) <= l.accessIdleWindow {
@@ -426,7 +454,9 @@ func (l *Limiter) recordAccess(uid int, ip string, now time.Time) {
 	event := panel.AccessEvent{
 		EventID:     uuid.NewString(),
 		UID:         uid,
-		ClientIP:    ip,
+		ClientIP:    clientIP,
+		PeerID:      peerID,
+		TunnelIP:    tunnelIP,
 		ConnectedAt: now.UnixMilli(),
 	}
 	if err := recorder(event); err == nil {
@@ -465,8 +495,8 @@ func (l *Limiter) GetOnlineDevice() (*[]panel.OnlineUser, error) {
 	return &onlineUser, nil
 }
 
-func (l *Limiter) markOnline(uid int, ip string, now time.Time) {
-	key := fmt.Sprintf("%d\x00%s", uid, ip)
+func (l *Limiter) markOnline(uid int, deviceKey, peerID, tunnelIP string, now time.Time) {
+	key := fmt.Sprintf("%d\x00%s", uid, deviceKey)
 	l.onlineMu.Lock()
 	if l.onlineLastSeen == nil {
 		l.onlineLastSeen = make(map[string]onlineDeviceEntry)
@@ -476,7 +506,9 @@ func (l *Limiter) markOnline(uid int, ip string, now time.Time) {
 	}
 	l.onlineLastSeen[key] = onlineDeviceEntry{
 		uid:      uid,
-		ip:       ip,
+		ip:       deviceKey,
+		peerID:   peerID,
+		tunnelIP: tunnelIP,
 		lastSeen: now,
 	}
 	l.onlineMu.Unlock()
@@ -496,7 +528,12 @@ func (l *Limiter) onlineSnapshot(now time.Time) []panel.OnlineUser {
 			delete(l.onlineLastSeen, key)
 			continue
 		}
-		online = append(online, panel.OnlineUser{UID: entry.uid, IP: entry.ip})
+		online = append(online, panel.OnlineUser{
+			UID:      entry.uid,
+			IP:       entry.ip,
+			PeerID:   entry.peerID,
+			TunnelIP: entry.tunnelIP,
+		})
 	}
 	sort.Slice(online, func(i, j int) bool {
 		if online[i].UID == online[j].UID {
@@ -505,6 +542,18 @@ func (l *Limiter) onlineSnapshot(now time.Time) []panel.OnlineUser {
 		return online[i].UID < online[j].UID
 	})
 	return online
+}
+
+func wireGuardPeerID(taguuid string) string {
+	separator := strings.LastIndexByte(taguuid, '|')
+	if separator < 0 {
+		return ""
+	}
+	uuid := taguuid[separator+1:]
+	if !strings.HasPrefix(uuid, "wg:") {
+		return ""
+	}
+	return strings.TrimPrefix(uuid, "wg:")
 }
 
 func (l *Limiter) removeOnlineUID(uid int) {

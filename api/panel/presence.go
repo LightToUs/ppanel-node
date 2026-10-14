@@ -3,13 +3,15 @@ package panel
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"encoding/json/v2"
 )
 
 type PresenceRequest struct {
 	UID      int    `json:"uid"`
-	ClientIP string `json:"client_ip"`
+	ClientIP string `json:"client_ip,omitempty"`
+	PeerID   string `json:"peer_id,omitempty"`
 }
 
 type PresenceDecision struct {
@@ -26,12 +28,15 @@ type presenceResponse struct {
 	Data *PresenceDecision `json:"data"`
 }
 
-func (c *ClientV1) AcquirePresence(ctx context.Context, uid int, clientIP string) (*PresenceDecision, error) {
+func (c *ClientV1) AcquirePresence(ctx context.Context, uid int, deviceKey string) (*PresenceDecision, error) {
 	const requestPath = "/v2/node/presence/acquire"
-	body, err := c.postSignedJSON(ctx, requestPath, PresenceRequest{
-		UID:      uid,
-		ClientIP: clientIP,
-	})
+	request := PresenceRequest{UID: uid}
+	if peerID, ok := strings.CutPrefix(deviceKey, "peer:"); ok {
+		request.PeerID = peerID
+	} else {
+		request.ClientIP = deviceKey
+	}
+	body, err := c.postSignedJSON(ctx, requestPath, request)
 	if err != nil {
 		return nil, err
 	}

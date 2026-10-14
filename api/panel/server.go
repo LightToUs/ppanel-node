@@ -68,52 +68,64 @@ type Outbound struct {
 }
 
 type Protocol struct {
-	Type                    string `json:"type"`
-	Port                    int    `json:"port"`
-	Enable                  bool   `json:"enable"`
-	Security                string `json:"security"`
-	SNI                     string `json:"sni"`
-	AllowInsecure           bool   `json:"allow_insecure"`
-	Fingerprint             string `json:"fingerprint"`
-	RealityServerAddr       string `json:"reality_server_addr"`
-	RealityServerPort       int    `json:"reality_server_port"`
-	RealityPrivateKey       string `json:"reality_private_key"`
-	RealityPublicKey        string `json:"reality_public_key"`
-	RealityShortID          string `json:"reality_short_id"`
-	Transport               string `json:"transport"`
-	Host                    string `json:"host"`
-	Path                    string `json:"path"`
-	ServiceName             string `json:"service_name"`
-	Cipher                  string `json:"cipher"`
-	ServerKey               string `json:"server_key"`
-	Flow                    string `json:"flow"`
-	HopPorts                string `json:"hop_ports"`
-	HopInterval             int    `json:"hop_interval"`
-	ObfsPassword            string `json:"obfs_password"`
-	DisableSNI              bool   `json:"disable_sni"`
-	ReduceRTT               bool   `json:"reduce_rtt"`
-	UDPRelayMode            string `json:"udp_relay_mode"`
-	CongestionController    string `json:"congestion_controller"`
-	Multiplex               string `json:"multiplex"`
-	PaddingScheme           string `json:"padding_scheme"`
-	UpMbps                  int    `json:"up_mbps"`
-	DownMbps                int    `json:"down_mbps"`
-	Obfs                    string `json:"obfs"`
-	ObfsHost                string `json:"obfs_host"`
-	ObfsPath                string `json:"obfs_path"`
-	XHTTPMode               string `json:"xhttp_mode"`
-	XHTTPExtra              string `json:"xhttp_extra"`
-	Encryption              string `json:"encryption"`
-	EncryptionMode          string `json:"encryption_mode"`
-	EncryptionRTT           string `json:"encryption_rtt"`
-	EncryptionTicket        string `json:"encryption_ticket"`
-	EncryptionServerPadding string `json:"encryption_server_padding"`
-	EncryptionPrivateKey    string `json:"encryption_private_key"`
-	EncryptionClientPadding string `json:"encryption_client_padding"`
-	EncryptionPassword      string `json:"encryption_password"`
-	CertMode                string `json:"cert_mode"`
-	CertDNSProvider         string `json:"cert_dns_provider"`
-	CertDNSEnv              string `json:"cert_dns_env"`
+	Type                      string   `json:"type"`
+	Port                      int      `json:"port"`
+	Enable                    bool     `json:"enable"`
+	Security                  string   `json:"security"`
+	SNI                       string   `json:"sni"`
+	AllowInsecure             bool     `json:"allow_insecure"`
+	Fingerprint               string   `json:"fingerprint"`
+	RealityServerAddr         string   `json:"reality_server_addr"`
+	RealityServerPort         int      `json:"reality_server_port"`
+	RealityPrivateKey         string   `json:"reality_private_key"`
+	RealityPublicKey          string   `json:"reality_public_key"`
+	RealityShortID            string   `json:"reality_short_id"`
+	Transport                 string   `json:"transport"`
+	Host                      string   `json:"host"`
+	Path                      string   `json:"path"`
+	ServiceName               string   `json:"service_name"`
+	Cipher                    string   `json:"cipher"`
+	ServerKey                 string   `json:"server_key"`
+	Flow                      string   `json:"flow"`
+	HopPorts                  string   `json:"hop_ports"`
+	HopInterval               int      `json:"hop_interval"`
+	ObfsPassword              string   `json:"obfs_password"`
+	DisableSNI                bool     `json:"disable_sni"`
+	ReduceRTT                 bool     `json:"reduce_rtt"`
+	UDPRelayMode              string   `json:"udp_relay_mode"`
+	CongestionController      string   `json:"congestion_controller"`
+	Multiplex                 string   `json:"multiplex"`
+	PaddingScheme             string   `json:"padding_scheme"`
+	UpMbps                    int      `json:"up_mbps"`
+	DownMbps                  int      `json:"down_mbps"`
+	Obfs                      string   `json:"obfs"`
+	ObfsHost                  string   `json:"obfs_host"`
+	ObfsPath                  string   `json:"obfs_path"`
+	XHTTPMode                 string   `json:"xhttp_mode"`
+	XHTTPExtra                string   `json:"xhttp_extra"`
+	Encryption                string   `json:"encryption"`
+	EncryptionMode            string   `json:"encryption_mode"`
+	EncryptionRTT             string   `json:"encryption_rtt"`
+	EncryptionTicket          string   `json:"encryption_ticket"`
+	EncryptionServerPadding   string   `json:"encryption_server_padding"`
+	EncryptionPrivateKey      string   `json:"encryption_private_key"`
+	EncryptionClientPadding   string   `json:"encryption_client_padding"`
+	EncryptionPassword        string   `json:"encryption_password"`
+	WireGuardEndpoint         string   `json:"wireguard_endpoint"`
+	WireGuardIPv4CIDR         string   `json:"wireguard_ipv4_cidr"`
+	WireGuardIPv6CIDR         string   `json:"wireguard_ipv6_cidr"`
+	WireGuardMTU              int      `json:"wireguard_mtu"`
+	WireGuardDNS              []string `json:"wireguard_dns"`
+	WireGuardKeepalive        int      `json:"wireguard_keepalive"`
+	WireGuardAllowedIPs       []string `json:"wireguard_allowed_ips"`
+	WireGuardReserved         []int    `json:"wireguard_reserved"`
+	WireGuardPresharedKey     bool     `json:"wireguard_preshared_key"`
+	WireGuardNativeConfig     bool     `json:"wireguard_native_config"`
+	WireGuardServerPublicKey  string   `json:"wireguard_server_public_key"`
+	WireGuardServerPrivateKey string   `json:"wireguard_server_private_key"`
+	CertMode                  string   `json:"cert_mode"`
+	CertDNSProvider           string   `json:"cert_dns_provider"`
+	CertDNSEnv                string   `json:"cert_dns_env"`
 }
 
 func GetServerConfig(ctx context.Context, c *ClientV2) (*ServerConfigResponse, error) {
@@ -162,7 +174,7 @@ func GetServerConfig(ctx context.Context, c *ClientV2) (*ServerConfigResponse, e
 	if err != nil {
 		return nil, fmt.Errorf("解码响应体失败: %s", err)
 	}
-	if resp.Data.Protocols == nil {
+	if resp.Data == nil || resp.Data.Protocols == nil {
 		return nil, fmt.Errorf("协议配置为空")
 	}
 	return resp, nil

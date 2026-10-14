@@ -50,6 +50,30 @@ func TestUpdateUserRefreshesLimiterStateForUpdatedUser(t *testing.T) {
 	}
 }
 
+func TestAliveListUpdateIsSafeDuringLimitChecks(t *testing.T) {
+	Init()
+	tag := "race-node"
+	user := panel.UserInfo{Id: 42, Uuid: "user", DeviceLimit: 2}
+	l := AddLimiter(tag, []panel.UserInfo{user}, map[int]int{42: 0})
+	tagUUID := format.UserTag(tag, user.Uuid)
+
+	var wait sync.WaitGroup
+	wait.Add(2)
+	go func() {
+		defer wait.Done()
+		for i := 0; i < 1000; i++ {
+			l.UpdateAliveList(map[int]int{42: i % 2})
+		}
+	}()
+	go func() {
+		defer wait.Done()
+		for i := 0; i < 1000; i++ {
+			_, _ = l.CheckLimit(tagUUID, "203.0.113.8", true, true)
+		}
+	}()
+	wait.Wait()
+}
+
 func TestPresenceEnforceRejectsExcessDeviceAndCachesDecision(t *testing.T) {
 	Init()
 	tag := "node-tag"
@@ -132,9 +156,9 @@ func TestRecordAccessDeduplicatesActiveDevice(t *testing.T) {
 	}, 90*time.Second)
 
 	start := time.Unix(1_700_000_000, 0)
-	l.recordAccess(42, "203.0.113.8", start)
-	l.recordAccess(42, "203.0.113.8", start.Add(30*time.Second))
-	l.recordAccess(42, "203.0.113.8", start.Add(121*time.Second))
+	l.recordAccess(42, "", "203.0.113.8", start)
+	l.recordAccess(42, "", "203.0.113.8", start.Add(30*time.Second))
+	l.recordAccess(42, "", "203.0.113.8", start.Add(121*time.Second))
 
 	if len(events) != 2 {
 		t.Fatalf("event count = %d, want 2", len(events))
@@ -156,7 +180,7 @@ func TestRecordAccessRemovesExpiredDeviceState(t *testing.T) {
 	}
 	l.SetAccessRecorder(func(panel.AccessEvent) error { return nil }, 90*time.Second)
 
-	l.recordAccess(42, "203.0.113.8", start)
+	l.recordAccess(42, "", "203.0.113.8", start)
 
 	if _, exists := l.accessLastSeen["1\x00198.51.100.1"]; exists {
 		t.Fatal("expired access device state was not removed")
@@ -237,7 +261,7 @@ func TestOnlineSnapshotIsNonDestructiveAndExpiresByActivityWindow(t *testing.T) 
 		onlineLastSeen: make(map[string]onlineDeviceEntry),
 		onlineWindow:   2 * time.Minute,
 	}
-	l.markOnline(42, "203.0.113.8", start)
+	l.markOnline(42, "203.0.113.8", "", "203.0.113.8", start)
 
 	first := l.onlineSnapshot(start.Add(time.Minute))
 	second := l.onlineSnapshot(start.Add(90 * time.Second))
@@ -254,7 +278,7 @@ func TestUpdateUserRemovesDeletedUserFromOnlineSnapshot(t *testing.T) {
 	Init()
 	tag := "node-tag"
 	l := AddLimiter(tag, []panel.UserInfo{{Id: 42, Uuid: "user"}}, nil)
-	l.markOnline(42, "203.0.113.8", time.Now())
+	l.markOnline(42, "203.0.113.8", "", "203.0.113.8", time.Now())
 
 	l.UpdateUser(tag, nil, []panel.UserInfo{{Id: 42, Uuid: "user"}})
 
@@ -264,5 +288,34 @@ func TestUpdateUserRemovesDeletedUserFromOnlineSnapshot(t *testing.T) {
 	}
 	if len(*snapshot) != 0 {
 		t.Fatalf("deleted user remains online: %#v", *snapshot)
+	}
+}
+
+func TestWireGuardUsesPeerIdentityForOnlineAndAudit(t *testing.T) {
+	Init()
+	tag := "wireguard-49"
+	user := panel.UserInfo{Id: 42, Uuid: "wg:456"}
+	l := AddLimiter(tag, []panel.UserInfo{user}, nil)
+	var events []panel.AccessEvent
+	l.SetAccessRecorder(func(event panel.AccessEvent) error {
+		events = append(events, event)
+		return nil
+	}, 90*time.Second)
+
+	if _, rejected := l.CheckLimit(
+		format.UserTag(tag, user.Uuid),
+		"10.200.0.2",
+		true,
+		true,
+	); rejected {
+		t.Fatal("WireGuard peer was rejected")
+	}
+	snapshot := l.onlineSnapshot(time.Now())
+	if len(snapshot) != 1 || snapshot[0].PeerID != "456" || snapshot[0].IP != "peer:456" {
+		t.Fatalf("WireGuard snapshot = %#v", snapshot)
+	}
+	if len(events) != 1 || events[0].PeerID != "456" ||
+		events[0].TunnelIP != "10.200.0.2" || events[0].ClientIP != "" {
+		t.Fatalf("WireGuard access event = %#v", events)
 	}
 }
