@@ -83,6 +83,34 @@ func TestReportAccessEventsUsesSignedRequestWithoutQuerySecret(t *testing.T) {
 	}
 }
 
+func TestReportAccessEventsRejectsBusinessError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"code":500,"msg":"Internal Server Error"}`))
+	}))
+	defer server.Close()
+
+	client, err := NewClientV1(&conf.NodeApiConfig{
+		APIHost:   server.URL,
+		NodeType:  "wireguard",
+		NodeID:    49,
+		SecretKey: "node-secret",
+	})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	err = client.ReportAccessEvents(t.Context(), []AccessEvent{{
+		EventID:     "c4de18e5-94e3-43aa-bff4-431945ce5754",
+		UID:         42,
+		PeerID:      "1",
+		TunnelIP:    "10.240.49.2",
+		ConnectedAt: 1_700_000_000_000,
+	}})
+	if err == nil {
+		t.Fatal("expected business response error")
+	}
+}
+
 func TestAcquirePresenceDecodesDecision(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/v2/node/presence/acquire" {

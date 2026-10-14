@@ -247,6 +247,19 @@ func (c *ClientV1) ReportAccessEvents(ctx context.Context, events []AccessEvent)
 		Events:     events,
 		ReportedAt: time.Now().UnixMilli(),
 	}
-	_, err := c.postSignedJSON(ctx, p, body)
-	return err
+	response, err := c.postSignedJSON(ctx, p, body)
+	if err != nil {
+		return err
+	}
+	var result struct {
+		Code uint32 `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	if err = json.Unmarshal(response, &result); err != nil {
+		return fmt.Errorf("decode access event response: %w", err)
+	}
+	if result.Code != 0 && result.Code != 200 {
+		return fmt.Errorf("report access events failed with business code %d: %s", result.Code, result.Msg)
+	}
+	return nil
 }
