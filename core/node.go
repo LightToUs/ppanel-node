@@ -6,6 +6,7 @@ import (
 	"github.com/lighttous/ppanel-node/api/panel"
 )
 
+// add
 func (v *XrayCore) AddNode(tag string, info *panel.NodeInfo) error {
 	inBoundConfig, err := buildInbound(info, tag)
 	if err != nil {
