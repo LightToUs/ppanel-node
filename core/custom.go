@@ -97,6 +97,113 @@ func normalizeOutboundProtocol(protocol string) string {
 	}
 }
 
+type fullRouteConfig struct {
+	name            string
+	networks        []string
+	blockedNetworks []string
+	managed         bool
+}
+
+func normalizeFullRouteNetworks(values []string) ([]string, error) {
+	if len(values) == 0 {
+		return []string{"tcp", "udp"}, nil
+	}
+	result := make([]string, 0, 2)
+	seen := make(map[string]struct{}, 2)
+	for _, value := range values {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value != "tcp" && value != "udp" {
+			return nil, fmt.Errorf("unsupported egress network %q", value)
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	if len(result) == 0 {
+		return nil, fmt.Errorf("egress must support at least one network")
+	}
+	return result, nil
+}
+
+func resolveFullRoute(
+	outboundList *[]panel.Outbound,
+	egress *panel.Egress,
+) (fullRouteConfig, error) {
+	if egress != nil && egress.Enabled {
+		if mode := strings.ToLower(strings.TrimSpace(egress.Mode)); mode != "" && mode != "all" {
+			return fullRouteConfig{}, fmt.Errorf("unsupported egress mode %q", egress.Mode)
+		}
+		name := strings.TrimSpace(egress.Outbound.Name)
+		if name == "" {
+			return fullRouteConfig{}, fmt.Errorf("egress outbound name is required")
+		}
+		if normalizeOutboundProtocol(egress.Outbound.Protocol) == "" {
+			return fullRouteConfig{}, fmt.Errorf("egress outbound protocol is required")
+		}
+		networks, err := normalizeFullRouteNetworks(egress.Networks)
+		if err != nil {
+			return fullRouteConfig{}, err
+		}
+		policy := strings.ToLower(strings.TrimSpace(egress.FailurePolicy))
+		if policy == "" {
+			policy = "block"
+		}
+		if policy != "block" && policy != "direct" {
+			return fullRouteConfig{}, fmt.Errorf("unsupported egress failure policy %q", egress.FailurePolicy)
+		}
+		blocked := make([]string, 0, 2-len(networks))
+		if policy == "block" {
+			for _, candidate := range []string{"tcp", "udp"} {
+				found := false
+				for _, network := range networks {
+					if candidate == network {
+						found = true
+						break
+					}
+				}
+				if !found {
+					blocked = append(blocked, candidate)
+				}
+			}
+		}
+		return fullRouteConfig{
+			name:            name,
+			networks:        networks,
+			blockedNetworks: blocked,
+			managed:         true,
+		}, nil
+	}
+
+	if outboundList == nil {
+		return fullRouteConfig{}, nil
+	}
+	var name string
+	for _, item := range *outboundList {
+		if normalizeOutboundProtocol(item.Protocol) != "wireguard" {
+			continue
+		}
+		if strings.TrimSpace(item.Name) == "" {
+			return fullRouteConfig{}, fmt.Errorf("wireguard outbound name is required")
+		}
+		if name != "" {
+			return fullRouteConfig{}, fmt.Errorf("only one wireguard full-route outbound is supported")
+		}
+		if strings.TrimSpace(item.Settings) == "" {
+			return fullRouteConfig{}, fmt.Errorf("wireguard outbound %q requires settings", item.Name)
+		}
+		name = item.Name
+	}
+	if name == "" {
+		return fullRouteConfig{}, nil
+	}
+	return fullRouteConfig{
+		name:     name,
+		networks: []string{"tcp", "udp"},
+	}, nil
+}
+
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
 		value = strings.TrimSpace(value)
@@ -315,6 +422,27 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 	dnsConfig := serverconfig.Data.DNS
 	blockList := serverconfig.Data.Block
 	outboundList := serverconfig.Data.Outbound
+	fullRoute, err := resolveFullRoute(outboundList, serverconfig.Data.Egress)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if fullRoute.managed {
+		managedOutbound := serverconfig.Data.Egress.Outbound
+		merged := make([]panel.Outbound, 0, 1)
+		if outboundList != nil {
+			merged = append(merged, (*outboundList)...)
+		}
+		for _, item := range merged {
+			if strings.TrimSpace(item.Name) == fullRoute.name {
+				return nil, nil, nil, fmt.Errorf(
+					"egress outbound tag %q conflicts with a custom outbound",
+					fullRoute.name,
+				)
+			}
+		}
+		merged = append(merged, managedOutbound)
+		outboundList = &merged
+	}
 
 	//default dns
 	queryStrategy := "UseIPv4v6"
@@ -386,13 +514,20 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 
 	//default route
 	domainStrategy := "AsIs"
-	dnsRule, _ := json.Marshal(map[string]interface{}{
-		"port":        "53",
-		"network":     "udp",
-		"outboundTag": "dns_out",
-	})
+	ruleList := make([]json.RawMessage, 0)
+	if fullRoute.name == "" {
+		dnsRule, err := json.Marshal(map[string]interface{}{
+			"port":        "53",
+			"network":     "udp",
+			"outboundTag": "dns_out",
+		})
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		ruleList = append(ruleList, dnsRule)
+	}
 	coreRouterConfig := &coreConf.RouterConfig{
-		RuleList:       []json.RawMessage{dnsRule},
+		RuleList:       ruleList,
 		DomainStrategy: &domainStrategy,
 	}
 
@@ -409,6 +544,27 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 				coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
 			}
 		}
+	}
+
+	if fullRoute.managed {
+		if len(fullRoute.blockedNetworks) > 0 {
+			blockedRule, marshalErr := json.Marshal(map[string]interface{}{
+				"network":     strings.Join(fullRoute.blockedNetworks, ","),
+				"outboundTag": "block",
+			})
+			if marshalErr != nil {
+				return nil, nil, nil, marshalErr
+			}
+			coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, blockedRule)
+		}
+		fullRouteRule, marshalErr := json.Marshal(map[string]interface{}{
+			"network":     strings.Join(fullRoute.networks, ","),
+			"outboundTag": fullRoute.name,
+		})
+		if marshalErr != nil {
+			return nil, nil, nil, marshalErr
+		}
+		coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, fullRouteRule)
 	}
 
 	//custom outbound
@@ -435,9 +591,12 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 			domains := buildRouteDomains(outbounditem.Rules)
 			custom_outbound, err := outbound.Build()
 			if err != nil {
+				if outbounditem.Name == fullRoute.name {
+					return nil, nil, nil, fmt.Errorf("build outbound %q: %w", outbounditem.Name, err)
+				}
 				continue
 			}
-			if len(domains) > 0 {
+			if !fullRoute.managed && outbounditem.Name != fullRoute.name && len(domains) > 0 {
 				rule := map[string]interface{}{
 					"domain":      domains,
 					"outboundTag": custom_outbound.Tag,
@@ -452,6 +611,16 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 			}
 			coreOutboundConfig = append(coreOutboundConfig, custom_outbound)
 		}
+	}
+	if fullRoute.name != "" && !fullRoute.managed {
+		fullRouteRule, err := json.Marshal(map[string]interface{}{
+			"network":     "tcp,udp",
+			"outboundTag": fullRoute.name,
+		})
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, fullRouteRule)
 	}
 	//build config
 	DnsConfig, err := coreDnsConfig.Build()

@@ -69,6 +69,13 @@ func New(config *conf.Conf, client *panel.ClientV2) *XrayCore {
 func (v *XrayCore) Start(serverconfig *panel.ServerConfigResponse) error {
 	v.access.Lock()
 	defer v.access.Unlock()
+	if serverconfig != nil &&
+		serverconfig.Data != nil &&
+		serverconfig.Data.ServerType == "relay_egress" {
+		v.ServerConfig = serverconfig
+		v.startTasks(serverconfig)
+		return nil
+	}
 	v.Server = getCore(v.Config, serverconfig)
 	if err := v.Server.Start(); err != nil {
 		return err

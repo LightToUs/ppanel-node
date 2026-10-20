@@ -488,3 +488,13 @@ parse_args "$@"
 echo -e "${green}开始安装${plain}"
 install_base
 install_ppnode "$VERSION_ARG"
+sleep 2
+if ! check_status; then
+    echo -e "${red}PPanel-node 启动后未保持运行，请检查服务日志。${plain}" >&2
+    if [[ x"${release}" == x"alpine" ]]; then
+        tail -n 80 /var/log/PPanel-node.log 2>/dev/null || true
+    else
+        journalctl -u PPanel-node -n 80 --no-pager 2>/dev/null || true
+    fi
+    exit 1
+fi

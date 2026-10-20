@@ -80,3 +80,33 @@ func TestNewKeepsFeaturesDisabledForLegacyServerResponse(t *testing.T) {
 		t.Fatalf("legacy response presence TTL = %s, want 90s", ttl)
 	}
 }
+
+func TestNewCreatesRelayAgentWithoutUserControllers(t *testing.T) {
+	protocols := make([]panel.Protocol, 0)
+	serverConfig := &panel.ServerConfigResponse{
+		Data: &panel.Data{
+			ServerType:   "relay_egress",
+			PushInterval: 30,
+			Protocols:    &protocols,
+		},
+	}
+	runtimeConfig := &conf.Conf{
+		ApiConfig: conf.ServerApiConfig{
+			ApiHost:   "https://panel.example.com",
+			ServerId:  57,
+			SecretKey: "node-secret",
+		},
+		StatePath: t.TempDir(),
+	}
+
+	relayNode, err := New(nil, runtimeConfig, serverConfig)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if relayNode.relayAgent == nil {
+		t.Fatal("relay agent was not created")
+	}
+	if len(relayNode.controllers) != 0 {
+		t.Fatalf("relay controllers = %d, want 0", len(relayNode.controllers))
+	}
+}

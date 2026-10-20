@@ -12,9 +12,36 @@ import (
 
 type Node struct {
 	controllers []*Controller
+	relayAgent  *RelayAgent
 }
 
 func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConfigResponse) (*Node, error) {
+	serverType := strings.ToLower(strings.TrimSpace(serverconfig.Data.ServerType))
+	if serverType == "relay_egress" {
+		client, err := panel.NewClientV1(&conf.NodeApiConfig{
+			APIHost:   config.ApiConfig.ApiHost,
+			NodeType:  "relay_egress",
+			NodeID:    config.ApiConfig.ServerId,
+			SecretKey: config.ApiConfig.SecretKey,
+		})
+		if err != nil {
+			return nil, err
+		}
+		pushInterval := serverconfig.Data.PushInterval
+		if pushInterval <= 0 {
+			pushInterval = 60
+		}
+		return &Node{
+			controllers: make([]*Controller, 0),
+			relayAgent: NewRelayAgent(
+				client,
+				config.StatePath,
+				config.ApiConfig.ServerId,
+				pushInterval,
+				core,
+			),
+		}, nil
+	}
 	node := &Node{
 		controllers: make([]*Controller, len(*serverconfig.Data.Protocols)),
 	}
@@ -69,6 +96,9 @@ func normalizeProtocolForRuntime(protocol *panel.Protocol) {
 }
 
 func (n *Node) Start() error {
+	if n.relayAgent != nil {
+		return n.relayAgent.Start()
+	}
 	for i := range n.controllers {
 		if !n.controllers[i].info.Protocol.Enable {
 			continue
@@ -93,6 +123,10 @@ func (n *Node) Close() error {
 		return nil
 	}
 	var closeErr error
+	if n.relayAgent != nil {
+		closeErr = errors.Join(closeErr, n.relayAgent.Close())
+		n.relayAgent = nil
+	}
 	for _, c := range n.controllers {
 		if c == nil {
 			continue

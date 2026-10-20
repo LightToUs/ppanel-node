@@ -15,6 +15,7 @@ type ServerConfigResponse struct {
 }
 
 type Data struct {
+	ServerType             string      `json:"server_type"`
 	TrafficReportThreshold int         `json:"traffic_report_threshold"`
 	PushInterval           int         `json:"push_interval"`
 	PullInterval           int         `json:"pull_interval"`
@@ -25,8 +26,20 @@ type Data struct {
 	DNS                    *[]DNSItem  `json:"dns"`
 	Block                  *[]string   `json:"block"`
 	Outbound               *[]Outbound `json:"outbound"`
+	Egress                 *Egress     `json:"egress,omitempty"`
 	Protocols              *[]Protocol `json:"protocols"`
 	Total                  int         `json:"total"`
+}
+
+// Egress is a managed full-route outbound. It is intentionally separate from
+// domain-based Outbound rules so enabling it always requires an explicit flag.
+type Egress struct {
+	Enabled       bool     `json:"enabled"`
+	Mode          string   `json:"mode"`
+	FailurePolicy string   `json:"failure_policy"`
+	Networks      []string `json:"networks"`
+	Revision      int64    `json:"revision"`
+	Outbound      Outbound `json:"outbound"`
 }
 
 type DNSItem struct {

@@ -14,8 +14,8 @@ import (
 )
 
 const (
-	nodeVersion      = "v1.2.2-reliable-20261013"
-	nodeCapabilities = "wireguard-inbound-v1,wg-user-schema-v1,wg-peer-identity-v1"
+	nodeVersion      = "v1.4.0-relay-egress"
+	nodeCapabilities = "wireguard-inbound-v1,wg-user-schema-v1,wg-peer-identity-v1,relay-egress-v1"
 )
 
 type ClientV1 struct {
@@ -88,6 +88,7 @@ func NewClientV1(c *conf.NodeApiConfig) (*ClientV1, error) {
 		"hy2",
 		"anytls",
 		"wireguard",
+		"relay_egress",
 		"vless":
 	default:
 		return nil, fmt.Errorf("unsupported Node type: %s", c.NodeType)
