@@ -47,6 +47,7 @@ VERSION_ARG=""
 API_HOST_ARG=""
 SERVER_ID_ARG=""
 SECRET_KEY_ARG=""
+SKIP_SYSTEM_TUNING=false
 
 parse_args() {
     while [[ $# -gt 0 ]]; do
@@ -60,8 +61,11 @@ parse_args() {
             --secret-key-stdin)
                 IFS= read -r SECRET_KEY_ARG
                 shift ;;
+            --skip-system-tuning)
+                SKIP_SYSTEM_TUNING=true
+                shift ;;
             -h|--help)
-                echo "用法: $0 [版本号] [--api-host URL] [--server-id ID] [--secret-key-stdin]"
+                echo "用法: $0 [版本号] [--api-host URL] [--server-id ID] [--secret-key-stdin] [--skip-system-tuning]"
                 exit 0 ;;
             --*)
                 echo "未知参数: $1"; exit 1 ;;
@@ -270,6 +274,163 @@ EOF
         fi
 }
 
+tune_system() {
+    if [[ "$SKIP_SYSTEM_TUNING" == true ]]; then
+        echo -e "${yellow}已跳过系统网络调优。${plain}"
+        return 0
+    fi
+    if [[ "$(uname -s)" != "Linux" ]] || ! command -v sysctl >/dev/null 2>&1; then
+        echo -e "${yellow}当前系统不支持 Linux sysctl，跳过系统网络调优。${plain}"
+        return 0
+    fi
+
+    local sysctl_dir="${PPNODE_SYSCTL_DIR:-/etc/sysctl.d}"
+    local modules_load_dir="${PPNODE_MODULES_LOAD_DIR:-/etc/modules-load.d}"
+    local state_dir="${PPNODE_TUNING_STATE_DIR:-/var/lib/ppanel-node}"
+    local meminfo_file="${PPNODE_MEMINFO_FILE:-/proc/meminfo}"
+    local tuning_file="${sysctl_dir}/99-ppanel-node.conf"
+    local backup_file="${tuning_file}.backup"
+    local modules_load_file="${modules_load_dir}/ppanel-node.conf"
+    local original_file="${state_dir}/sysctl.original.conf"
+    local temp_file
+    local original_temp=""
+    local capture_original=false
+    local mem_kb
+    local conntrack_max
+    local current_conntrack_max
+    local available_cc
+    local current_cc
+    local apply_output
+
+    mkdir -p "$sysctl_dir" "$modules_load_dir" "$state_dir"
+    temp_file="$(mktemp /tmp/ppanel-node-sysctl.XXXXXX)"
+    cat > "$temp_file" <<'EOF'
+# Managed by PPanel-node. Re-run the installer to refresh detected limits.
+EOF
+    if [[ ! -f "$original_file" ]]; then
+        capture_original=true
+        original_temp="$(mktemp /tmp/ppanel-node-sysctl-original.XXXXXX)"
+        cat > "$original_temp" <<'EOF'
+# Original values captured before the first PPanel-node system tuning.
+EOF
+    fi
+
+    append_sysctl() {
+        local key="$1"
+        local value="$2"
+        local current
+        if current="$(sysctl -n "$key" 2>/dev/null)"; then
+            if [[ "$capture_original" == true ]]; then
+                printf '%s = %s\n' "$key" "$current" >> "$original_temp"
+            fi
+            printf '%s = %s\n' "$key" "$value" >> "$temp_file"
+        fi
+    }
+
+    append_sysctl_at_least() {
+        local key="$1"
+        local desired="$2"
+        local current
+        current="$(sysctl -n "$key" 2>/dev/null || true)"
+        if [[ "$current" =~ ^[0-9]+$ ]] && (( current > desired )); then
+            desired="$current"
+        fi
+        append_sysctl "$key" "$desired"
+    }
+
+    append_sysctl_triplet_at_least() {
+        local key="$1"
+        local desired_min="$2"
+        local desired_default="$3"
+        local desired_max="$4"
+        local current_min
+        local current_default
+        local current_max
+        read -r current_min current_default current_max < <(sysctl -n "$key" 2>/dev/null || true)
+        if [[ "$current_min" =~ ^[0-9]+$ ]] && (( current_min > desired_min )); then
+            desired_min="$current_min"
+        fi
+        if [[ "$current_default" =~ ^[0-9]+$ ]] && (( current_default > desired_default )); then
+            desired_default="$current_default"
+        fi
+        if [[ "$current_max" =~ ^[0-9]+$ ]] && (( current_max > desired_max )); then
+            desired_max="$current_max"
+        fi
+        append_sysctl "$key" "$desired_min $desired_default $desired_max"
+    }
+
+    # Capacity limits are raised but never reduced below an administrator's current setting.
+    append_sysctl_at_least fs.file-max 2097152
+    append_sysctl_at_least fs.nr_open 1048576
+    append_sysctl_at_least net.core.somaxconn 65535
+    append_sysctl_at_least net.core.netdev_max_backlog 65536
+    append_sysctl_at_least net.core.rmem_max 33554432
+    append_sysctl_at_least net.core.wmem_max 33554432
+    append_sysctl_at_least net.core.optmem_max 262144
+    append_sysctl_at_least net.ipv4.tcp_max_syn_backlog 65536
+    append_sysctl_at_least net.ipv4.tcp_mtu_probing 1
+    append_sysctl_triplet_at_least net.ipv4.tcp_rmem 4096 131072 33554432
+    append_sysctl_triplet_at_least net.ipv4.tcp_wmem 4096 16384 33554432
+    append_sysctl net.ipv4.tcp_syncookies 1
+    append_sysctl net.ipv4.tcp_fastopen 3
+    append_sysctl net.ipv4.ip_local_port_range "1024 65535"
+    append_sysctl net.ipv4.udp_rmem_min 8192
+    append_sysctl net.ipv4.udp_wmem_min 8192
+
+    # Allocate roughly one conntrack entry per 16 KiB of RAM, bounded for small and large hosts.
+    mem_kb="$(awk '/^MemTotal:/ {print $2; exit}' "$meminfo_file" 2>/dev/null)"
+    if [[ "$mem_kb" =~ ^[0-9]+$ ]]; then
+        conntrack_max=$((mem_kb / 16))
+        (( conntrack_max < 65536 )) && conntrack_max=65536
+        (( conntrack_max > 1048576 )) && conntrack_max=1048576
+        current_conntrack_max="$(sysctl -n net.netfilter.nf_conntrack_max 2>/dev/null || true)"
+        if [[ "$current_conntrack_max" =~ ^[0-9]+$ ]] &&
+           (( current_conntrack_max > conntrack_max )); then
+            conntrack_max="$current_conntrack_max"
+        fi
+        append_sysctl net.netfilter.nf_conntrack_max "$conntrack_max"
+    fi
+
+    # BBR is enabled only when the running kernel advertises support.
+    if command -v modprobe >/dev/null 2>&1; then
+        modprobe tcp_bbr >/dev/null 2>&1 || true
+    fi
+    available_cc="$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || true)"
+    if [[ " $available_cc " == *" bbr "* ]]; then
+        printf 'tcp_bbr\n' > "$modules_load_file"
+        append_sysctl net.core.default_qdisc fq
+        append_sysctl net.ipv4.tcp_congestion_control bbr
+    else
+        rm -f "$modules_load_file"
+        echo -e "${yellow}当前内核不支持 BBR，保留现有 TCP 拥塞控制算法。${plain}"
+    fi
+
+    if [[ "$capture_original" == true ]]; then
+        cp "$original_temp" "$original_file"
+        chmod 0600 "$original_file"
+        rm -f "$original_temp"
+    fi
+
+    if [[ -f "$tuning_file" ]] && cmp -s "$temp_file" "$tuning_file"; then
+        rm -f "$temp_file"
+    else
+        if [[ -f "$tuning_file" ]]; then
+            cp -p "$tuning_file" "$backup_file"
+        fi
+        cp "$temp_file" "$tuning_file"
+        chmod 0644 "$tuning_file"
+        rm -f "$temp_file"
+    fi
+
+    if apply_output="$(sysctl -p "$tuning_file" 2>&1)"; then
+        current_cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo unknown)"
+        echo -e "${green}系统网络调优已生效，TCP 拥塞控制: ${current_cc}${plain}"
+    else
+        echo -e "${yellow}部分系统网络参数无法应用，节点服务将继续运行。${plain}" >&2
+        printf '%s\n' "$apply_output" >&2
+    fi
+}
+
 install_ppnode() {
     local version_param="$1"
     local install_dir="/usr/local/PPanel-node"
@@ -369,6 +530,7 @@ command_user="root"
 
 pidfile="/run/ppnode.pid"
 command_background="yes"
+rc_ulimit="-n 1048576"
 
 depend() {
         need net
@@ -392,7 +554,7 @@ Type=simple
 LimitAS=infinity
 LimitRSS=infinity
 LimitCORE=infinity
-LimitNOFILE=999999
+LimitNOFILE=1048576
 WorkingDirectory=/usr/local/PPanel-node/
 ExecStart=/usr/local/PPanel-node/ppnode server
 Restart=always
@@ -484,17 +646,24 @@ EOF
     fi
 }
 
-parse_args "$@"
-echo -e "${green}开始安装${plain}"
-install_base
-install_ppnode "$VERSION_ARG"
-sleep 2
-if ! check_status; then
-    echo -e "${red}PPanel-node 启动后未保持运行，请检查服务日志。${plain}" >&2
-    if [[ x"${release}" == x"alpine" ]]; then
-        tail -n 80 /var/log/PPanel-node.log 2>/dev/null || true
-    else
-        journalctl -u PPanel-node -n 80 --no-pager 2>/dev/null || true
+main() {
+    parse_args "$@"
+    echo -e "${green}开始安装${plain}"
+    install_base
+    install_ppnode "$VERSION_ARG"
+    sleep 2
+    if ! check_status; then
+        echo -e "${red}PPanel-node 启动后未保持运行，请检查服务日志。${plain}" >&2
+        if [[ x"${release}" == x"alpine" ]]; then
+            tail -n 80 /var/log/PPanel-node.log 2>/dev/null || true
+        else
+            journalctl -u PPanel-node -n 80 --no-pager 2>/dev/null || true
+        fi
+        exit 1
     fi
-    exit 1
+    tune_system
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
 fi
