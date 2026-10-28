@@ -569,20 +569,19 @@ EOF
         echo -e "${green}PPanel-node ${last_version}${plain} 安装完成，已设置开机自启"
     fi
 
-    if [[ ! -f /etc/PPanel-node/config.yml ]]; then
-        # 如果通过 CLI 传入了完整参数，则直接生成配置并跳过交互
-        if [[ -n "$API_HOST_ARG" && -n "$SERVER_ID_ARG" && -n "$SECRET_KEY_ARG" ]]; then
-            if ! generate_ppnode_config "$API_HOST_ARG" "$SERVER_ID_ARG" "$SECRET_KEY_ARG"; then
-                restore_previous_install
-                rm -f "$config_backup"
-                exit 1
-            fi
-            echo -e "${green}已根据参数生成 /etc/PPanel-node/config.yml${plain}"
-            first_install=false
-        else
-            cp config.yml /etc/PPanel-node/
-            first_install=true
+    # 控制面部署会显式传入完整身份。即使机器已安装过其他节点，也必须
+    # 覆盖旧配置，否则新进程仍会以旧 Server ID 拉取配置。
+    if [[ -n "$API_HOST_ARG" && -n "$SERVER_ID_ARG" && -n "$SECRET_KEY_ARG" ]]; then
+        if ! generate_ppnode_config "$API_HOST_ARG" "$SERVER_ID_ARG" "$SECRET_KEY_ARG"; then
+            restore_previous_install
+            rm -f "$config_backup"
+            exit 1
         fi
+        echo -e "${green}已根据部署参数更新 /etc/PPanel-node/config.yml${plain}"
+        first_install=false
+    elif [[ ! -f /etc/PPanel-node/config.yml ]]; then
+        cp config.yml /etc/PPanel-node/
+        first_install=true
     else
         if [[ x"${release}" == x"alpine" ]]; then
             service PPanel-node start
