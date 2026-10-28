@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -45,5 +46,25 @@ func TestReportServerMetricsUsesSignedEndpoint(t *testing.T) {
 	}
 	if !received {
 		t.Fatal("metrics request was not received")
+	}
+}
+
+func TestReportServerMetricsMapsNotFoundToUnsupported(t *testing.T) {
+	server := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(server.Close)
+
+	client, err := NewClientV1(&conf.NodeApiConfig{
+		APIHost:   server.URL,
+		NodeID:    9,
+		NodeType:  "metrics",
+		SecretKey: "secret",
+	})
+	if err != nil {
+		t.Fatalf("NewClientV1() error = %v", err)
+	}
+
+	err = client.ReportServerMetrics(t.Context(), &ServerMetricsReport{})
+	if !errors.Is(err, ErrMetricsUnsupported) {
+		t.Fatalf("ReportServerMetrics() error = %v, want ErrMetricsUnsupported", err)
 	}
 }

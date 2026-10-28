@@ -33,6 +33,7 @@ type MetricsAgent struct {
 	reportTask        *task.Task
 	access            sync.Mutex
 	warningAt         map[string]time.Time
+	unsupported       bool
 }
 
 func NewMetricsAgent(
@@ -88,6 +89,9 @@ func (a *MetricsAgent) Close() {
 }
 
 func (a *MetricsAgent) report(ctx context.Context) error {
+	if a.unsupported {
+		return nil
+	}
 	interfaceName, err := a.resolveInterface()
 	if err != nil {
 		a.warnRateLimited("resolve-interface", "Resolve metrics network interface failed", err)
@@ -120,6 +124,11 @@ func (a *MetricsAgent) report(ctx context.Context) error {
 		MemoryPercent:  memory,
 		DiskPercent:    disk,
 	}); err != nil {
+		if errors.Is(err, panel.ErrMetricsUnsupported) {
+			a.unsupported = true
+			log.Info("控制面未启用实时指标接口，已停止本进程的指标上报")
+			return nil
+		}
 		a.warnRateLimited("report", "Report server realtime metrics failed", err)
 	}
 	// Metrics are best effort and must never stop the periodic task or proxy runtime.

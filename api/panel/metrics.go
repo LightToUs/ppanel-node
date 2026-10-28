@@ -3,8 +3,11 @@ package panel
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 )
+
+var ErrMetricsUnsupported = errors.New("control plane does not support realtime metrics")
 
 type ServerMetricsReport struct {
 	SchemaVersion  int     `json:"schema_version"`
@@ -29,6 +32,10 @@ func (c *ClientV1) ReportServerMetrics(
 	const endpoint = "/v2/node/metrics"
 	body, err := c.postSignedJSON(ctx, endpoint, report)
 	if err != nil {
+		var statusErr *HTTPStatusError
+		if errors.As(err, &statusErr) && statusErr.StatusCode == 404 {
+			return ErrMetricsUnsupported
+		}
 		return err
 	}
 	if len(body) == 0 {

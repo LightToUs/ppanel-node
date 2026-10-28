@@ -14,6 +14,21 @@ import (
 	"github.com/google/uuid"
 )
 
+type HTTPStatusError struct {
+	RequestPath string
+	StatusCode  int
+	Body        string
+}
+
+func (e *HTTPStatusError) Error() string {
+	return fmt.Sprintf(
+		"request %s failed with status %d: %s",
+		e.RequestPath,
+		e.StatusCode,
+		e.Body,
+	)
+}
+
 func (c *ClientV1) postSignedJSON(ctx context.Context, requestPath string, body any) ([]byte, error) {
 	if c == nil || c.SignedClient == nil {
 		return nil, fmt.Errorf("signed node client is not configured")
@@ -54,7 +69,11 @@ func (c *ClientV1) postSignedJSON(ctx context.Context, requestPath string, body 
 		return nil, fmt.Errorf("request %s failed: %w", requestPath, err)
 	}
 	if response.StatusCode() >= 400 {
-		return nil, fmt.Errorf("request %s failed with status %d: %s", requestPath, response.StatusCode(), string(response.Body()))
+		return nil, &HTTPStatusError{
+			RequestPath: requestPath,
+			StatusCode:  response.StatusCode(),
+			Body:        string(response.Body()),
+		}
 	}
 	return append([]byte(nil), response.Body()...), nil
 }

@@ -1,6 +1,14 @@
 package node
 
-import "testing"
+import (
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
+	"testing"
+
+	"github.com/lighttous/ppanel-node/api/panel"
+	"github.com/lighttous/ppanel-node/conf"
+)
 
 func TestIsMetricsInterface(t *testing.T) {
 	tests := []struct {
@@ -31,5 +39,38 @@ func TestBootIdentityFallbackIsStableForSample(t *testing.T) {
 	}
 	if bootID == "" {
 		t.Fatal("bootIdentity() returned empty boot ID")
+	}
+}
+
+func TestMetricsAgentDisablesReportingAfterUnsupportedResponse(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		http.NotFound(w, nil)
+	}))
+	t.Cleanup(server.Close)
+
+	client, err := panel.NewClientV1(&conf.NodeApiConfig{
+		APIHost:   server.URL,
+		NodeID:    9,
+		NodeType:  "metrics",
+		SecretKey: "secret",
+	})
+	if err != nil {
+		t.Fatalf("NewClientV1() error = %v", err)
+	}
+	agent := NewMetricsAgent(client, nil, "")
+
+	if err = agent.report(t.Context()); err != nil {
+		t.Fatalf("first report() error = %v", err)
+	}
+	if err = agent.report(t.Context()); err != nil {
+		t.Fatalf("second report() error = %v", err)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("metrics requests = %d, want 1", got)
+	}
+	if !agent.unsupported {
+		t.Fatal("metrics agent was not marked unsupported")
 	}
 }
