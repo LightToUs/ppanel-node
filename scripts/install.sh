@@ -49,17 +49,32 @@ SERVER_ID_ARG=""
 SECRET_KEY_ARG=""
 SKIP_SYSTEM_TUNING=false
 
+require_option_value() {
+    local option="$1"
+    local value="${2-}"
+    if [[ -z "$value" || "$value" == --* ]]; then
+        echo -e "${red}错误：参数 ${option} 缺少值${plain}" >&2
+        exit 1
+    fi
+}
+
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --api-host)
+                require_option_value "$1" "${2-}"
                 API_HOST_ARG="$2"; shift 2 ;;
             --server-id)
+                require_option_value "$1" "${2-}"
                 SERVER_ID_ARG="$2"; shift 2 ;;
             --secret-key)
+                require_option_value "$1" "${2-}"
                 SECRET_KEY_ARG="$2"; shift 2 ;;
             --secret-key-stdin)
-                IFS= read -r SECRET_KEY_ARG
+                if ! IFS= read -r SECRET_KEY_ARG || [[ -z "$SECRET_KEY_ARG" ]]; then
+                    echo -e "${red}错误：未从标准输入读取到通讯密钥${plain}" >&2
+                    exit 1
+                fi
                 shift ;;
             --skip-system-tuning)
                 SKIP_SYSTEM_TUNING=true
@@ -78,6 +93,13 @@ parse_args() {
                 fi ;;
         esac
     done
+
+    if [[ -n "$API_HOST_ARG" || -n "$SERVER_ID_ARG" || -n "$SECRET_KEY_ARG" ]]; then
+        if [[ -z "$API_HOST_ARG" || -z "$SERVER_ID_ARG" || -z "$SECRET_KEY_ARG" ]]; then
+            echo -e "${red}错误：--api-host、--server-id 和密钥参数必须同时提供${plain}" >&2
+            exit 1
+        fi
+    fi
 }
 
 arch=$(uname -m)
