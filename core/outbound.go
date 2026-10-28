@@ -15,7 +15,7 @@ func buildDefaultOutbound() (*core.OutboundHandlerConfig, error) {
 	outboundDetourConfig.Tag = "Default"
 	outboundDetourConfig.StreamSetting = &conf.StreamConfig{
 		SocketSettings: &conf.SocketConfig{
-			DomainStrategy: "UseIPv4v6",
+			DomainStrategy: defaultOutboundDomainStrategy(hasPublicIPv6()),
 		},
 	}
 	//sendthrough := "origin"
@@ -29,6 +29,13 @@ func buildDefaultOutbound() (*core.OutboundHandlerConfig, error) {
 	}
 	outboundDetourConfig.Settings = &setting
 	return outboundDetourConfig.Build()
+}
+
+func defaultOutboundDomainStrategy(hasIPv6 bool) string {
+	if hasIPv6 {
+		return "UseIPv4v6"
+	}
+	return "UseIPv4"
 }
 
 // build block outbund
