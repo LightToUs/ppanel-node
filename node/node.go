@@ -8,27 +8,15 @@ import (
 	"github.com/lighttous/ppanel-node/api/panel"
 	"github.com/lighttous/ppanel-node/conf"
 	vCore "github.com/lighttous/ppanel-node/core"
-	log "github.com/sirupsen/logrus"
 )
 
 type Node struct {
-	controllers  []*Controller
-	relayAgent   *RelayAgent
-	metricsAgent *MetricsAgent
+	controllers []*Controller
+	relayAgent  *RelayAgent
 }
 
 func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConfigResponse) (*Node, error) {
 	serverType := strings.ToLower(strings.TrimSpace(serverconfig.Data.ServerType))
-	metricsClient, metricsErr := panel.NewClientV1(&conf.NodeApiConfig{
-		APIHost:   config.ApiConfig.ApiHost,
-		NodeType:  "metrics",
-		NodeID:    config.ApiConfig.ServerId,
-		SecretKey: config.ApiConfig.SecretKey,
-		Timeout:   5,
-	})
-	if metricsErr != nil {
-		log.WithField("err", metricsErr).Warn("Initialize optional realtime metrics client failed")
-	}
 	if serverType == "relay_egress" {
 		client, err := panel.NewClientV1(&conf.NodeApiConfig{
 			APIHost:   config.ApiConfig.ApiHost,
@@ -44,8 +32,7 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 			pushInterval = 60
 		}
 		return &Node{
-			controllers:  make([]*Controller, 0),
-			metricsAgent: NewMetricsAgent(metricsClient, core, relayInterfaceName),
+			controllers: make([]*Controller, 0),
 			relayAgent: NewRelayAgent(
 				client,
 				config.StatePath,
@@ -56,8 +43,7 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 		}, nil
 	}
 	node := &Node{
-		controllers:  make([]*Controller, len(*serverconfig.Data.Protocols)),
-		metricsAgent: NewMetricsAgent(metricsClient, core, ""),
+		controllers: make([]*Controller, len(*serverconfig.Data.Protocols)),
 	}
 	pushinterval := serverconfig.Data.PushInterval
 	if pushinterval <= 0 {
@@ -111,11 +97,7 @@ func normalizeProtocolForRuntime(protocol *panel.Protocol) {
 
 func (n *Node) Start() error {
 	if n.relayAgent != nil {
-		if err := n.relayAgent.Start(); err != nil {
-			return err
-		}
-		n.metricsAgent.Start()
-		return nil
+		return n.relayAgent.Start()
 	}
 	for i := range n.controllers {
 		if !n.controllers[i].info.Protocol.Enable {
@@ -133,7 +115,6 @@ func (n *Node) Start() error {
 				err)
 		}
 	}
-	n.metricsAgent.Start()
 	return nil
 }
 
@@ -142,10 +123,6 @@ func (n *Node) Close() error {
 		return nil
 	}
 	var closeErr error
-	if n.metricsAgent != nil {
-		n.metricsAgent.Close()
-		n.metricsAgent = nil
-	}
 	if n.relayAgent != nil {
 		closeErr = errors.Join(closeErr, n.relayAgent.Close())
 		n.relayAgent = nil

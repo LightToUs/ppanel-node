@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	log "github.com/sirupsen/logrus"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/infra/conf"
 )
@@ -13,11 +14,9 @@ func buildDefaultOutbound() (*core.OutboundHandlerConfig, error) {
 	outboundDetourConfig := &conf.OutboundDetourConfig{}
 	outboundDetourConfig.Protocol = "freedom"
 	outboundDetourConfig.Tag = "Default"
-	outboundDetourConfig.StreamSetting = &conf.StreamConfig{
-		SocketSettings: &conf.SocketConfig{
-			DomainStrategy: "UseIPv4v6",
-		},
-	}
+	// #region debug-point B:generated-outbound-strategy
+	log.WithFields(log.Fields{"sessionId": "japan-a1-dns-errors", "runId": "post-fix", "hypothesisId": "B", "location": "core/outbound.go:buildDefaultOutbound", "domainStrategy": "AsIs", "strategyLayer": "system-dialer"}).Info("[DEBUG] Generated Freedom outbound strategy")
+	// #endregion
 	//sendthrough := "origin"
 	//outboundDetourConfig.SendThrough = &sendthrough
 

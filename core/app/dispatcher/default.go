@@ -518,6 +518,20 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 	outbounds := session.OutboundsFromContext(ctx)
 	ob := outbounds[len(outbounds)-1]
 
+	// #region debug-point A-D:domain-request-context
+	if ob.Target.Address.Family().IsDomain() {
+		inboundTag, source, userEmail := "", "", ""
+		if inbound := session.InboundFromContext(ctx); inbound != nil {
+			inboundTag = inbound.Tag
+			source = inbound.Source.String()
+			if inbound.User != nil {
+				userEmail = inbound.User.Email
+			}
+		}
+		errors.LogInfo(ctx, "[DEBUG] sessionId=japan-a1-dns-errors runId=post-fix hypothesisId=A,D location=core/app/dispatcher/default.go:routedDispatch target=", ob.Target, " originalTarget=", ob.OriginalTarget, " dispatchDestination=", destination, " inboundTag=", inboundTag, " source=", source, " user=", userEmail, " protocol=", protocol)
+	}
+	// #endregion
+
 	var handler outbound.Handler
 
 	routingLink := routing_session.AsRoutingContext(ctx)
