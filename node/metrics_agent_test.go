@@ -53,7 +53,7 @@ func TestMetricsAgentDisablesReportingAfterUnsupportedResponse(t *testing.T) {
 	client, err := panel.NewClientV1(&conf.NodeApiConfig{
 		APIHost:   server.URL,
 		NodeID:    9,
-		NodeType:  "metrics",
+		NodeType:  "hysteria2",
 		SecretKey: "secret",
 	})
 	if err != nil {

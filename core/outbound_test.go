@@ -7,11 +7,7 @@ import (
 	"github.com/xtls/xray-core/transport/internet"
 )
 
-<<<<<<< HEAD
-func TestBuildDefaultOutboundUsesSystemResolver(t *testing.T) {
-=======
 func TestBuildDefaultOutboundUsesHostSocketDomainStrategy(t *testing.T) {
->>>>>>> 4fb9e11e3bbf15568901c53f9bb5da0277797b29
 	outbound, err := buildDefaultOutbound()
 	if err != nil {
 		t.Fatalf("build default outbound: %v", err)
@@ -28,11 +24,6 @@ func TestBuildDefaultOutboundUsesHostSocketDomainStrategy(t *testing.T) {
 	if sender.TargetStrategy != internet.DomainStrategy_AS_IS {
 		t.Fatalf("target strategy = %v, want AS_IS", sender.TargetStrategy)
 	}
-<<<<<<< HEAD
-	if sender.StreamSettings != nil && sender.StreamSettings.SocketSettings != nil &&
-		sender.StreamSettings.SocketSettings.DomainStrategy.HasStrategy() {
-		t.Fatalf("socket domain strategy = %v, want AS_IS", sender.StreamSettings.SocketSettings.DomainStrategy)
-=======
 	if sender.StreamSettings == nil || sender.StreamSettings.SocketSettings == nil {
 		t.Fatal("default outbound is missing socket settings")
 	}
@@ -46,7 +37,6 @@ func TestBuildDefaultOutboundUsesHostSocketDomainStrategy(t *testing.T) {
 			sender.StreamSettings.SocketSettings.DomainStrategy,
 			expected,
 		)
->>>>>>> 4fb9e11e3bbf15568901c53f9bb5da0277797b29
 	}
 }
 
