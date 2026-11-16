@@ -22,6 +22,9 @@ type Data struct {
 	AccessAuditEnabled     bool        `json:"access_audit_enabled"`
 	PresenceMode           string      `json:"presence_mode"`
 	PresenceLeaseTTL       int         `json:"presence_lease_ttl"`
+	QuotaLeaseMode         string      `json:"quota_lease_mode"`
+	QuotaLeaseTTL          int         `json:"quota_lease_ttl"`
+	QuotaLeaseGrantBytes   int64       `json:"quota_lease_grant_bytes"`
 	IPStrategy             string      `json:"ip_strategy"`
 	DNS                    *[]DNSItem  `json:"dns"`
 	Block                  *[]string   `json:"block"`
@@ -57,6 +60,7 @@ type Outbound struct {
 	Password             string   `json:"password"`
 	UUID                 string   `json:"uuid"`
 	Cipher               string   `json:"cipher"`
+	ServerKey            string   `json:"server_key"`
 	Security             string   `json:"security"`
 	SNI                  string   `json:"sni"`
 	AllowInsecure        bool     `json:"allow_insecure"`
@@ -71,6 +75,8 @@ type Outbound struct {
 	CongestionController string   `json:"congestion_controller"`
 	UDPStream            bool     `json:"udp_stream"`
 	ReduceRTT            bool     `json:"reduce_rtt"`
+	Obfs                 string   `json:"obfs"`
+	ObfsPassword         string   `json:"obfs_password"`
 	Heartbeat            int      `json:"heartbeat"`
 	RealityPublicKey     string   `json:"reality_public_key"`
 	RealityShortID       string   `json:"reality_short_id"`

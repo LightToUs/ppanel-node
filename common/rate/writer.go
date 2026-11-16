@@ -1,17 +1,20 @@
 package rate
 
 import (
-	"github.com/juju/ratelimit"
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
 )
 
-type Writer struct {
-	writer  buf.Writer
-	limiter *ratelimit.Bucket
+type Waiter interface {
+	Wait(int64)
 }
 
-func NewRateLimitWriter(writer buf.Writer, limiter *ratelimit.Bucket) buf.Writer {
+type Writer struct {
+	writer  buf.Writer
+	limiter Waiter
+}
+
+func NewRateLimitWriter(writer buf.Writer, limiter Waiter) buf.Writer {
 	return &Writer{
 		writer:  writer,
 		limiter: limiter,

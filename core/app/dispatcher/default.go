@@ -6,6 +6,7 @@ import (
 	"context"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/lighttous/ppanel-node/common/counter"
@@ -100,13 +101,14 @@ func (r *cachedReader) Interrupt() {
 
 // DefaultDispatcher is a default implementation of Dispatcher.
 type DefaultDispatcher struct {
-	ohm          outbound.Manager
-	router       routing.Router
-	policy       policy.Manager
-	stats        stats.Manager
-	fdns         dns.FakeDNSEngine
-	Counter      sync.Map
-	LinkManagers sync.Map // map[string]*LinkManager
+	ohm              outbound.Manager
+	router           routing.Router
+	policy           policy.Manager
+	stats            stats.Manager
+	fdns             dns.FakeDNSEngine
+	Counter          sync.Map
+	LinkManagers     sync.Map // map[string]*LinkManager
+	trafficSuspended atomic.Bool
 }
 
 func init() {
@@ -147,6 +149,9 @@ func (*DefaultDispatcher) Start() error {
 func (*DefaultDispatcher) Close() error { return nil }
 
 func (d *DefaultDispatcher) getLink(ctx context.Context, network net.Network) (*transport.Link, *transport.Link, *limiter.Limiter, error) {
+	if d.trafficSuspended.Load() {
+		return nil, nil, nil, errors.New("server traffic budget is suspended")
+	}
 	opt := pipe.OptionsFromContext(ctx)
 	uplinkReader, uplinkWriter := pipe.New(opt...)
 	downlinkReader, downlinkWriter := pipe.New(opt...)
@@ -181,7 +186,7 @@ func (d *DefaultDispatcher) getLink(ctx context.Context, network net.Network) (*
 		}
 		// Speed Limit and Device Limit
 		sourceIP := sessionInbound.Source.Address.IP().String()
-		w, reject := limit.CheckLimit(user.Email,
+		w, budget, reject := limit.CheckLimit(user.Email,
 			sourceIP,
 			network == net.Network_TCP,
 			sessionInbound.Source.Network == net.Network_TCP)
@@ -193,26 +198,37 @@ func (d *DefaultDispatcher) getLink(ctx context.Context, network net.Network) (*
 			common.Interrupt(inboundLink.Reader)
 			return nil, nil, nil, errors.New("Limited ", user.Email, " by conn or ip")
 		}
-		var lm *LinkManager
-		if lmloaded, ok := d.LinkManagers.Load(user.Email); !ok {
-			lm = &LinkManager{
-				links: make(map[*ManagedWriter]buf.Reader),
-			}
-			d.LinkManagers.Store(user.Email, lm)
-		} else {
-			lm = lmloaded.(*LinkManager)
-		}
+		value, _ := d.LinkManagers.LoadOrStore(user.Email, NewLinkManager())
+		lm := value.(*LinkManager)
 		managedWriter := &ManagedWriter{
 			writer:  uplinkWriter,
 			manager: lm,
 			onClose: limit.TrackPresence(user.Email, sourceIP),
 		}
-		lm.AddLink(managedWriter, outboundLink.Reader)
+		if !lm.AddLink(managedWriter, outboundLink.Reader) {
+			common.Close(managedWriter)
+			common.Close(outboundLink.Writer)
+			common.Interrupt(outboundLink.Reader)
+			common.Interrupt(inboundLink.Reader)
+			return nil, nil, nil, errors.New("user authorization revoked: ", user.Email)
+		}
 		inboundLink.Writer = managedWriter
 		if w != nil {
 			sessionInbound.CanSpliceCopy = 3
 			inboundLink.Writer = rate.NewRateLimitWriter(inboundLink.Writer, w)
 			outboundLink.Writer = rate.NewRateLimitWriter(outboundLink.Writer, w)
+		}
+		if budget != nil {
+			sessionInbound.CanSpliceCopy = 3
+			inboundLink.Writer = rate.NewQuotaWriter(inboundLink.Writer, budget, true)
+			outboundLink.Writer = rate.NewQuotaWriter(outboundLink.Writer, budget, false)
+		}
+		if budget != nil {
+			if d.trafficSuspended.Load() {
+				closeTrafficBudgetLink(inboundLink, outboundLink)
+				return nil, nil, nil, errors.New("server traffic budget is suspended")
+			}
+			return inboundLink, outboundLink, limit, nil
 		}
 		var t *counter.TrafficCounter
 		if c, ok := d.Counter.Load(sessionInbound.Tag); !ok {
@@ -234,7 +250,29 @@ func (d *DefaultDispatcher) getLink(ctx context.Context, network net.Network) (*
 		}
 	}
 
+	if d.trafficSuspended.Load() {
+		closeTrafficBudgetLink(inboundLink, outboundLink)
+		return nil, nil, nil, errors.New("server traffic budget is suspended")
+	}
 	return inboundLink, outboundLink, limit, nil
+}
+
+func closeTrafficBudgetLink(inboundLink, outboundLink *transport.Link) {
+	common.Close(inboundLink.Writer)
+	common.Close(outboundLink.Writer)
+	common.Interrupt(inboundLink.Reader)
+	common.Interrupt(outboundLink.Reader)
+}
+
+func (d *DefaultDispatcher) SetTrafficSuspended(suspended bool) {
+	if d == nil || d.trafficSuspended.Swap(suspended) == suspended || !suspended {
+		return
+	}
+	d.LinkManagers.Range(func(key, value interface{}) bool {
+		value.(*LinkManager).CloseAll()
+		d.LinkManagers.Delete(key)
+		return true
+	})
 }
 
 func (d *DefaultDispatcher) shouldOverride(ctx context.Context, result SniffResult, request session.SniffingRequest, destination net.Destination) bool {
@@ -367,7 +405,7 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 		}
 		// Speed Limit and Device Limit
 		sourceIP := sessionInbound.Source.Address.IP().String()
-		w, reject := limit.CheckLimit(user.Email,
+		w, budget, reject := limit.CheckLimit(user.Email,
 			sourceIP,
 			destination.Network == net.Network_TCP,
 			sessionInbound.Source.Network == net.Network_TCP)
@@ -377,47 +415,53 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 			common.Interrupt(outbound.Reader)
 			return errors.New("Limited ", user.Email, " by conn or ip")
 		}
-		var lm *LinkManager
-		if lmloaded, ok := d.LinkManagers.Load(user.Email); !ok {
-			lm = &LinkManager{
-				links: make(map[*ManagedWriter]buf.Reader),
-			}
-			d.LinkManagers.Store(user.Email, lm)
-		} else {
-			lm = lmloaded.(*LinkManager)
-		}
+		value, _ := d.LinkManagers.LoadOrStore(user.Email, NewLinkManager())
+		lm := value.(*LinkManager)
 		managedWriter := &ManagedWriter{
 			writer:  outbound.Writer,
 			manager: lm,
 			onClose: limit.TrackPresence(user.Email, sourceIP),
 		}
-		lm.AddLink(managedWriter, outbound.Reader)
+		if !lm.AddLink(managedWriter, outbound.Reader) {
+			common.Close(managedWriter)
+			common.Interrupt(outbound.Reader)
+			return errors.New("user authorization revoked: ", user.Email)
+		}
 		outbound.Writer = managedWriter
 		if w != nil {
 			sessionInbound.CanSpliceCopy = 3
 			outbound.Writer = rate.NewRateLimitWriter(outbound.Writer, w)
 		}
-		var t *counter.TrafficCounter
-		if c, ok := d.Counter.Load(sessionInbound.Tag); !ok {
-			t = counter.NewTrafficCounter()
-			d.Counter.Store(sessionInbound.Tag, t)
-		} else {
-			t = c.(*counter.TrafficCounter)
+		if budget != nil {
+			sessionInbound.CanSpliceCopy = 3
+			outbound.Writer = rate.NewQuotaWriter(outbound.Writer, budget, false)
 		}
-
-		ts := t.GetCounter(user.Email)
-		downcounter := &counter.XrayTrafficCounter{V: &ts.DownCounter}
 		var limitedReader buf.TimeoutReader = &buf.TimeoutWrapperReader{Reader: outbound.Reader}
 		if w != nil {
 			limitedReader = rate.NewRateLimitReader(limitedReader, w)
 		}
-		outbound.Reader = &CounterReader{
-			Reader:  limitedReader,
-			Counter: &ts.UpCounter,
+		if budget != nil {
+			limitedReader = rate.NewQuotaReader(limitedReader, budget, true)
 		}
-		outbound.Writer = &dispatcher.SizeStatWriter{
-			Counter: downcounter,
-			Writer:  outbound.Writer,
+		outbound.Reader = limitedReader
+		if budget == nil {
+			var t *counter.TrafficCounter
+			if c, ok := d.Counter.Load(sessionInbound.Tag); !ok {
+				t = counter.NewTrafficCounter()
+				d.Counter.Store(sessionInbound.Tag, t)
+			} else {
+				t = c.(*counter.TrafficCounter)
+			}
+
+			ts := t.GetCounter(user.Email)
+			outbound.Reader = &CounterReader{
+				Reader:  limitedReader,
+				Counter: &ts.UpCounter,
+			}
+			outbound.Writer = &dispatcher.SizeStatWriter{
+				Counter: &counter.XrayTrafficCounter{V: &ts.DownCounter},
+				Writer:  outbound.Writer,
+			}
 		}
 	}
 

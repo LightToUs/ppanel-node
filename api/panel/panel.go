@@ -14,20 +14,21 @@ import (
 )
 
 const (
-	nodeVersion      = "v1.4.0-relay-egress"
-	nodeCapabilities = "wireguard-inbound-v1,wg-user-schema-v1,wg-peer-identity-v1,relay-egress-v1"
+	nodeVersion      = "v1.7.0-strict-quota"
+	nodeCapabilities = "wireguard-inbound-v1,wg-user-schema-v1,wg-peer-identity-v1,relay-egress-v1,traffic-quota-lease-v1"
 )
 
 type ClientV1 struct {
-	Client       *resty.Client
-	SignedClient *resty.Client
-	APIHost      string
-	SecretKey    string
-	NodeType     string
-	NodeId       int
-	userEtag     string
-	UserList     *UserListBody
-	AliveMap     *AliveMap
+	Client            *resty.Client
+	SignedClient      *resty.Client
+	APIHost           string
+	SecretKey         string
+	NodeType          string
+	NodeId            int
+	ManagedInstanceID int64
+	userEtag          string
+	UserList          *UserListBody
+	AliveMap          *AliveMap
 }
 
 type ClientV2 struct {
@@ -89,6 +90,7 @@ func NewClientV1(c *conf.NodeApiConfig) (*ClientV1, error) {
 		"anytls",
 		"wireguard",
 		"relay_egress",
+		"metrics",
 		"vless":
 	default:
 		return nil, fmt.Errorf("unsupported Node type: %s", c.NodeType)
@@ -100,14 +102,15 @@ func NewClientV1(c *conf.NodeApiConfig) (*ClientV1, error) {
 		"secret_key": c.SecretKey,
 	})
 	return &ClientV1{
-		Client:       client,
-		SignedClient: signedClient,
-		SecretKey:    c.SecretKey,
-		APIHost:      c.APIHost,
-		NodeType:     c.NodeType,
-		NodeId:       c.NodeID,
-		UserList:     &UserListBody{},
-		AliveMap:     &AliveMap{},
+		Client:            client,
+		SignedClient:      signedClient,
+		SecretKey:         c.SecretKey,
+		APIHost:           c.APIHost,
+		NodeType:          c.NodeType,
+		NodeId:            c.NodeID,
+		ManagedInstanceID: c.ManagedInstanceID,
+		UserList:          &UserListBody{},
+		AliveMap:          &AliveMap{},
 	}, nil
 }
 

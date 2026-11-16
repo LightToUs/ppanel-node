@@ -129,7 +129,23 @@ func (c *Controller) userListMonitor(ctx context.Context) (err error) {
 		return nil
 	}
 	deleted, added, updated := compareUserList(c.userList, newU)
+	if len(added) > 0 || len(deleted) > 0 || len(updated) > 0 {
+		if c.quotaManager != nil {
+			if err = c.quotaManager.UpdateUsers(newU); err != nil {
+				c.apiClient.ResetUserETag()
+				log.WithFields(log.Fields{"tag": c.tag, "err": err}).
+					Error("Persist quota user changes failed")
+				return nil
+			}
+		}
+	}
 	if err = c.applyUserChanges(deleted, added, updated); err != nil {
+		if c.quotaManager != nil {
+			if rollbackErr := c.quotaManager.UpdateUsers(c.userList); rollbackErr != nil {
+				log.WithFields(log.Fields{"tag": c.tag, "err": rollbackErr}).
+					Error("Rollback quota user changes failed")
+			}
+		}
 		c.apiClient.ResetUserETag()
 		log.WithFields(log.Fields{"tag": c.tag, "err": err}).
 			Error("Apply user changes failed; runtime changes rolled back")
@@ -138,13 +154,6 @@ func (c *Controller) userListMonitor(ctx context.Context) (err error) {
 	if len(added) > 0 || len(deleted) > 0 || len(updated) > 0 {
 		// update Limiter
 		c.limiter.UpdateUser(c.tag, append(added, updated...), deleted)
-		if err != nil {
-			log.WithFields(log.Fields{
-				"tag": c.tag,
-				"err": err,
-			}).Error("limiter users failed")
-			return nil
-		}
 	}
 	c.userList = newU
 	if len(added)+len(deleted)+len(updated) != 0 {
@@ -334,6 +343,8 @@ func sameUserState(oldUser, newUser panel.UserInfo) bool {
 	return oldUser.Id == newUser.Id &&
 		oldUser.SpeedLimit == newUser.SpeedLimit &&
 		oldUser.DeviceLimit == newUser.DeviceLimit &&
+		oldUser.QuotaRequired == newUser.QuotaRequired &&
+		oldUser.QuotaEpoch == newUser.QuotaEpoch &&
 		oldUser.Placeholder == newUser.Placeholder &&
 		oldUser.PeerId == newUser.PeerId &&
 		oldUser.PublicKey == newUser.PublicKey &&

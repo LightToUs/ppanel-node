@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/juju/ratelimit"
 	"github.com/lighttous/ppanel-node/api/panel"
 	"github.com/lighttous/ppanel-node/common/format"
+	nodequota "github.com/lighttous/ppanel-node/quota"
 )
 
 var limitLock sync.RWMutex
@@ -27,7 +27,7 @@ type Limiter struct {
 	OldUserOnline *sync.Map      // Key: Ip, value: Uid
 	UUIDtoUID     map[string]int // Key: UUID, value: Uid
 	UserLimitInfo *sync.Map      // Key: TagUUID, value: UserLimitInfo
-	SpeedLimiter  *sync.Map      // key: TagUUID, value: *ratelimit.Bucket
+	SpeedLimiter  *sync.Map      // key: TagUUID, value: *RateController
 	AliveList     map[int]int    // Key: Uid, value: alive_ip
 
 	usersMu          sync.RWMutex
@@ -49,6 +49,8 @@ type Limiter struct {
 	presenceCache      map[string]presenceCacheEntry
 	presenceActive     map[string]presenceActiveEntry
 	presenceCleanupAt  time.Time
+
+	quotaProvider func(uid int, required bool, epoch int64) (*nodequota.Budget, bool)
 }
 
 type presenceCacheEntry struct {
@@ -78,6 +80,8 @@ type UserLimitInfo struct {
 	ExpireTime        int64
 	OverLimit         bool
 	Placeholder       bool
+	QuotaRequired     bool
+	QuotaEpoch        int64
 }
 
 func AddLimiter(tag string, users []panel.UserInfo, aliveList map[int]int) *Limiter {
@@ -106,6 +110,8 @@ func AddLimiter(tag string, users []panel.UserInfo, aliveList map[int]int) *Limi
 		}
 		userLimit.OverLimit = false
 		userLimit.Placeholder = users[i].Placeholder
+		userLimit.QuotaRequired = users[i].QuotaRequired
+		userLimit.QuotaEpoch = users[i].QuotaEpoch
 		info.UserLimitInfo.Store(format.UserTag(tag, users[i].Uuid), userLimit)
 	}
 	info.UUIDtoUID = uuidmap
@@ -152,10 +158,11 @@ func (l *Limiter) UpdateUser(tag string, upserts []panel.UserInfo, deleted []pan
 			l.removeOnlineUID(oldUID)
 		}
 		l.UserOnlineIP.Delete(tagUUID)
-		l.SpeedLimiter.Delete(tagUUID)
 		userLimit := &UserLimitInfo{
-			UID:         upserts[i].Id,
-			Placeholder: upserts[i].Placeholder,
+			UID:           upserts[i].Id,
+			Placeholder:   upserts[i].Placeholder,
+			QuotaRequired: upserts[i].QuotaRequired,
+			QuotaEpoch:    upserts[i].QuotaEpoch,
 		}
 		if upserts[i].SpeedLimit != 0 {
 			userLimit.SpeedLimit = upserts[i].SpeedLimit
@@ -167,6 +174,9 @@ func (l *Limiter) UpdateUser(tag string, upserts []panel.UserInfo, deleted []pan
 		userLimit.OverLimit = false
 		l.UserLimitInfo.Store(tagUUID, userLimit)
 		l.UUIDtoUID[upserts[i].Uuid] = upserts[i].Id
+		if value, ok := l.SpeedLimiter.Load(tagUUID); ok {
+			value.(*RateController).Update(l.effectiveBytesPerSecond(userLimit.SpeedLimit))
+		}
 	}
 }
 
@@ -210,7 +220,20 @@ func (l *Limiter) SetPresenceAuthorizer(
 	l.presenceAuthorizer = authorizer
 }
 
-func (l *Limiter) CheckLimit(taguuid string, ip string, isTcp bool, noSSUDP bool) (Bucket *ratelimit.Bucket, Reject bool) {
+func (l *Limiter) SetQuotaProvider(
+	provider func(uid int, required bool, epoch int64) (*nodequota.Budget, bool),
+) {
+	l.usersMu.Lock()
+	l.quotaProvider = provider
+	l.usersMu.Unlock()
+}
+
+func (l *Limiter) CheckLimit(
+	taguuid string,
+	ip string,
+	isTcp bool,
+	noSSUDP bool,
+) (controller *RateController, budget *nodequota.Budget, reject bool) {
 	// check if ipv4 mapped ipv6
 	ip = strings.TrimPrefix(ip, "::ffff:")
 	peerID := wireGuardPeerID(taguuid)
@@ -225,11 +248,15 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, isTcp bool, noSSUDP bool
 	deviceLimit := 0
 	var uid int
 	var placeholder bool
+	var quotaRequired bool
+	var quotaEpoch int64
 	if v, ok := l.UserLimitInfo.Load(taguuid); ok {
 		u := v.(*UserLimitInfo)
 		deviceLimit = u.DeviceLimit
 		uid = u.UID
 		placeholder = u.Placeholder
+		quotaRequired = u.QuotaRequired
+		quotaEpoch = u.QuotaEpoch
 		if u.ExpireTime < time.Now().Unix() && u.ExpireTime != 0 {
 			if u.SpeedLimit != 0 {
 				userLimit = u.SpeedLimit
@@ -242,11 +269,11 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, isTcp bool, noSSUDP bool
 			userLimit = determineSpeedLimit(u.SpeedLimit, u.DynamicSpeedLimit)
 		}
 	} else {
-		return nil, true
+		return nil, nil, true
 	}
 	now := time.Now()
 	if !placeholder && !l.authorizePresence(uid, deviceKey, now) {
-		return nil, true
+		return nil, nil, true
 	}
 	if noSSUDP {
 		// Store online user for device limit
@@ -263,7 +290,7 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, isTcp bool, noSSUDP bool
 				if deviceLimit > 0 {
 					if deviceLimit <= aliveIp {
 						ipMap.Delete(deviceKey)
-						return nil, true
+						return nil, nil, true
 					}
 				}
 			}
@@ -275,30 +302,41 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, isTcp bool, noSSUDP bool
 			if deviceLimit > 0 {
 				if deviceLimit <= aliveIp {
 					l.UserOnlineIP.Delete(taguuid)
-					return nil, true
+					return nil, nil, true
 				}
 			}
 		}
 	}
 	if !placeholder {
+		l.usersMu.RLock()
+		provider := l.quotaProvider
+		l.usersMu.RUnlock()
+		if provider != nil {
+			var allowed bool
+			budget, allowed = provider(uid, quotaRequired, quotaEpoch)
+			if !allowed {
+				return nil, budget, true
+			}
+		}
 		// Online visibility is protocol-independent. In particular, authenticated
 		// HY2 sessions arrive over UDP and must not be excluded by noSSUDP.
 		l.markOnline(uid, deviceKey, peerID, ip, now)
 		l.recordAccess(uid, peerID, ip, now)
 	}
 
-	limit := int64(determineSpeedLimit(nodeLimit, userLimit)) * 1000000 / 8 // If you need the Speed limit
-	if limit > 0 {
-		Bucket = ratelimit.NewBucketWithQuantum(time.Second, limit, limit) // Byte/s
-		if v, ok := l.SpeedLimiter.LoadOrStore(taguuid, Bucket); ok {
-			return v.(*ratelimit.Bucket), false
-		} else {
-			l.SpeedLimiter.Store(taguuid, Bucket)
-			return Bucket, false
-		}
-	} else {
-		return nil, false
+	limit := int64(determineSpeedLimit(nodeLimit, userLimit)) * 1000000 / 8
+	candidate := newRateController(limit)
+	value, loaded := l.SpeedLimiter.LoadOrStore(taguuid, candidate)
+	if !loaded {
+		return candidate, budget, false
 	}
+	controller = value.(*RateController)
+	controller.Update(limit)
+	return controller, budget, false
+}
+
+func (l *Limiter) effectiveBytesPerSecond(userLimit int) int64 {
+	return int64(determineSpeedLimit(l.SpeedLimit, userLimit)) * 1000000 / 8
 }
 
 func (l *Limiter) TrackPresence(taguuid string, ip string) func() {

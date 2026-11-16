@@ -46,6 +46,7 @@ fi
 VERSION_ARG=""
 API_HOST_ARG=""
 SERVER_ID_ARG=""
+MANAGED_INSTANCE_ID_ARG="0"
 SECRET_KEY_ARG=""
 
 require_option_value() {
@@ -66,6 +67,9 @@ parse_args() {
             --server-id)
                 require_option_value "$1" "${2-}"
                 SERVER_ID_ARG="$2"; shift 2 ;;
+            --managed-instance-id)
+                require_option_value "$1" "${2-}"
+                MANAGED_INSTANCE_ID_ARG="$2"; shift 2 ;;
             --secret-key)
                 require_option_value "$1" "${2-}"
                 SECRET_KEY_ARG="$2"; shift 2 ;;
@@ -76,7 +80,7 @@ parse_args() {
                 fi
                 shift ;;
             -h|--help)
-                echo "用法: $0 [版本号] [--api-host URL] [--server-id ID] [--secret-key-stdin]"
+                echo "用法: $0 [版本号] [--api-host URL] [--server-id ID] [--managed-instance-id ID] [--secret-key-stdin]"
                 exit 0 ;;
             --*)
                 echo "未知参数: $1"; exit 1 ;;
@@ -253,6 +257,7 @@ generate_ppnode_config() {
         local api_host="$1"
         local server_id="$2"
         local secret_key="$3"
+        local managed_instance_id="${4:-0}"
         local escaped_secret_key
         escaped_secret_key="${secret_key//\'/\'\'}"
 
@@ -271,6 +276,8 @@ Api:
   ApiHost: ${api_host}
   # 服务器唯一标识
   ServerID: ${server_id}
+  # 托管物理实例标识；0 表示兼容的非托管节点
+  ManagedInstanceID: ${managed_instance_id}
   # 通讯密钥，用于验证请求合法性
   SecretKey: '${escaped_secret_key}'
   # 请求超时时间（单位：秒）
@@ -432,7 +439,7 @@ EOF
     # 控制面部署会显式传入完整身份。即使机器已安装过其他节点，也必须
     # 覆盖旧配置，否则新进程仍会以旧 Server ID 拉取配置。
     if [[ -n "$API_HOST_ARG" && -n "$SERVER_ID_ARG" && -n "$SECRET_KEY_ARG" ]]; then
-        if ! generate_ppnode_config "$API_HOST_ARG" "$SERVER_ID_ARG" "$SECRET_KEY_ARG"; then
+        if ! generate_ppnode_config "$API_HOST_ARG" "$SERVER_ID_ARG" "$SECRET_KEY_ARG" "$MANAGED_INSTANCE_ID_ARG"; then
             restore_previous_install
             rm -f "$config_backup"
             exit 1

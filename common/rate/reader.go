@@ -3,7 +3,6 @@ package rate
 import (
 	"time"
 
-	"github.com/juju/ratelimit"
 	"github.com/xtls/xray-core/common/buf"
 )
 
@@ -11,10 +10,10 @@ var _ buf.TimeoutReader = (*Reader)(nil)
 
 type Reader struct {
 	reader  buf.TimeoutReader
-	limiter *ratelimit.Bucket
+	limiter Waiter
 }
 
-func NewRateLimitReader(reader buf.TimeoutReader, limiter *ratelimit.Bucket) buf.TimeoutReader {
+func NewRateLimitReader(reader buf.TimeoutReader, limiter Waiter) buf.TimeoutReader {
 	return &Reader{
 		reader:  reader,
 		limiter: limiter,

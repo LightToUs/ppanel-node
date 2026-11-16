@@ -112,6 +112,18 @@ func (v *XrayCore) Close() error {
 	return server.Close()
 }
 
+func (v *XrayCore) SetTrafficSuspended(suspended bool) {
+	if v == nil {
+		return
+	}
+	v.access.Lock()
+	dispatcher := v.dispatcher
+	v.access.Unlock()
+	if dispatcher != nil {
+		dispatcher.SetTrafficSuspended(suspended)
+	}
+}
+
 func getCore(c *conf.Conf, serverconfig *panel.ServerConfigResponse) *core.Instance {
 	// Log Config
 	coreLogConfig := &coreConf.LogConfig{
