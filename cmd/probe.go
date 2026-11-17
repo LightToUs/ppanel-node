@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"errors"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -26,16 +27,24 @@ var probeCommand = cobra.Command{
 }
 
 func init() {
-	probeCommand.Flags().StringVar(&probeAPIHost, "api-host", "", "PPanel API base URL")
-	probeCommand.Flags().StringVar(&probeToken, "token", "", "probe agent bearer token")
+	probeCommand.Flags().StringVar(
+		&probeAPIHost,
+		"api-host",
+		os.Getenv("PPANEL_API_HOST"),
+		"PPanel API base URL",
+	)
+	probeCommand.Flags().StringVar(
+		&probeToken,
+		"token",
+		os.Getenv("PPANEL_PROBE_TOKEN"),
+		"probe agent bearer token",
+	)
 	probeCommand.Flags().DurationVar(
 		&probePollInterval,
 		"poll-interval",
 		5*time.Second,
 		"task polling interval",
 	)
-	_ = probeCommand.MarkFlagRequired("api-host")
-	_ = probeCommand.MarkFlagRequired("token")
 	command.AddCommand(&probeCommand)
 }
 
