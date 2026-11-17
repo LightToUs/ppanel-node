@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/juju/ratelimit"
 	"github.com/lighttous/ppanel-node/api/panel"
 	"github.com/lighttous/ppanel-node/common/format"
 )
@@ -19,7 +18,8 @@ func TestUpdateUserRefreshesLimiterStateForUpdatedUser(t *testing.T) {
 	}
 	l := AddLimiter(tag, users, map[int]int{1: 2})
 	tagUUID := format.UserTag(tag, "u1")
-	l.SpeedLimiter.Store(tagUUID, ratelimit.NewBucketWithQuantum(time.Second, 1, 1))
+	controller := newRateController(l.effectiveBytesPerSecond(10))
+	l.SpeedLimiter.Store(tagUUID, controller)
 	online := new(sync.Map)
 	online.Store("1.1.1.1", 1)
 	l.UserOnlineIP.Store(tagUUID, online)
@@ -28,8 +28,12 @@ func TestUpdateUserRefreshesLimiterStateForUpdatedUser(t *testing.T) {
 		{Id: 2, Uuid: "u1", SpeedLimit: 20, DeviceLimit: 3},
 	}, nil)
 
-	if _, ok := l.SpeedLimiter.Load(tagUUID); ok {
-		t.Fatalf("speed limiter for %s should be recreated after update", tagUUID)
+	value, ok := l.SpeedLimiter.Load(tagUUID)
+	if !ok {
+		t.Fatalf("speed controller for %s should remain available", tagUUID)
+	}
+	if value != controller {
+		t.Fatalf("speed controller for %s was replaced; active links would retain stale state", tagUUID)
 	}
 	if _, ok := l.UserOnlineIP.Load(tagUUID); ok {
 		t.Fatalf("online device cache for %s should be cleared after update", tagUUID)
@@ -68,7 +72,7 @@ func TestAliveListUpdateIsSafeDuringLimitChecks(t *testing.T) {
 	go func() {
 		defer wait.Done()
 		for i := 0; i < 1000; i++ {
-			_, _ = l.CheckLimit(tagUUID, "203.0.113.8", true, true)
+			_, _, _ = l.CheckLimit(tagUUID, "203.0.113.8", true, true)
 		}
 	}()
 	wait.Wait()
@@ -85,7 +89,7 @@ func TestPresenceEnforceRejectsExcessDeviceAndCachesDecision(t *testing.T) {
 	})
 
 	for range 2 {
-		_, rejected := l.CheckLimit(format.UserTag(tag, "user"), "203.0.113.8", true, true)
+		_, _, rejected := l.CheckLimit(format.UserTag(tag, "user"), "203.0.113.8", true, true)
 		if !rejected {
 			t.Fatal("enforce mode allowed a denied device")
 		}
@@ -110,7 +114,7 @@ func TestPresenceObserveNeverRejectsAndEnforceFailsClosed(t *testing.T) {
 			l.SetPresenceAuthorizer(test.mode, 90*time.Second, func(int, string) (bool, error) {
 				return false, errors.New("control plane unavailable")
 			})
-			_, rejected := l.CheckLimit(format.UserTag(tag, "user"), "203.0.113.8", true, true)
+			_, _, rejected := l.CheckLimit(format.UserTag(tag, "user"), "203.0.113.8", true, true)
 			if rejected != test.wantReject {
 				t.Fatalf("rejected = %v, want %v", rejected, test.wantReject)
 			}
@@ -128,7 +132,7 @@ func TestPresenceRefreshesOnlyWhileConnectionIsTracked(t *testing.T) {
 		calls++
 		return true, nil
 	})
-	if _, rejected := l.CheckLimit(tagUUID, "203.0.113.8", true, true); rejected {
+	if _, _, rejected := l.CheckLimit(tagUUID, "203.0.113.8", true, true); rejected {
 		t.Fatal("initial presence acquisition was rejected")
 	}
 	release := l.TrackPresence(tagUUID, "203.0.113.8")
@@ -225,7 +229,7 @@ func TestCheckLimitDoesNotAuditPlaceholderUser(t *testing.T) {
 		return nil
 	}, 90*time.Second)
 
-	_, rejected := l.CheckLimit(format.UserTag(tag, "placeholder"), "203.0.113.8", true, true)
+	_, _, rejected := l.CheckLimit(format.UserTag(tag, "placeholder"), "203.0.113.8", true, true)
 	if rejected {
 		t.Fatal("placeholder connection was unexpectedly rejected")
 	}
@@ -240,7 +244,7 @@ func TestCheckLimitTracksUDPUserInOnlineSnapshot(t *testing.T) {
 	tagUUID := format.UserTag(tag, "hy2-user")
 	l := AddLimiter(tag, []panel.UserInfo{{Id: 42, Uuid: "hy2-user"}}, nil)
 
-	if _, rejected := l.CheckLimit(tagUUID, "203.0.113.8", false, false); rejected {
+	if _, _, rejected := l.CheckLimit(tagUUID, "203.0.113.8", false, false); rejected {
 		t.Fatal("authenticated UDP user was rejected")
 	}
 	snapshot, err := l.GetOnlineDevice()
@@ -302,7 +306,7 @@ func TestWireGuardUsesPeerIdentityForOnlineAndAudit(t *testing.T) {
 		return nil
 	}, 90*time.Second)
 
-	if _, rejected := l.CheckLimit(
+	if _, _, rejected := l.CheckLimit(
 		format.UserTag(tag, user.Uuid),
 		"10.200.0.2",
 		true,

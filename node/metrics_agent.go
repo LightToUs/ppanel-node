@@ -21,6 +21,7 @@ import (
 )
 
 const metricsInterval = 10 * time.Second
+const budgetGuardInterval = time.Second
 const metricsWarningInterval = 5 * time.Minute
 
 type MetricsAgent struct {
@@ -31,7 +32,13 @@ type MetricsAgent struct {
 	sessionID         string
 	sequence          uint64
 	reportTask        *task.Task
+	guardTask         *task.Task
 	access            sync.Mutex
+	budgetMu          sync.Mutex
+	budgetDirective   *panel.ServerTrafficBudgetDirective
+	baselineUpload    uint64
+	baselineDownload  uint64
+	budgetInterface   string
 	warningAt         map[string]time.Time
 	unsupported       bool
 }
@@ -71,7 +78,14 @@ func (a *MetricsAgent) Start() {
 		Execute:  a.report,
 		ReloadCh: reloadCh,
 	}
+	a.guardTask = &task.Task{
+		Name:     "enforceServerTrafficBudget",
+		Interval: budgetGuardInterval,
+		Execute:  a.enforceBudget,
+		ReloadCh: reloadCh,
+	}
 	_ = a.reportTask.Start(true)
+	_ = a.guardTask.Start(false)
 	log.WithField("interval", a.reportTask.Interval).Info("服务器实时指标任务已启动")
 }
 
@@ -81,10 +95,15 @@ func (a *MetricsAgent) Close() {
 	}
 	a.access.Lock()
 	reportTask := a.reportTask
+	guardTask := a.guardTask
 	a.reportTask = nil
+	a.guardTask = nil
 	a.access.Unlock()
 	if reportTask != nil {
 		reportTask.Close()
+	}
+	if guardTask != nil {
+		guardTask.Close()
 	}
 }
 
@@ -109,7 +128,7 @@ func (a *MetricsAgent) report(ctx context.Context) error {
 	}
 	bootTime, bootID := bootIdentity(uptime)
 	a.sequence++
-	if err = a.client.ReportServerMetrics(ctx, &panel.ServerMetricsReport{
+	directive, err := a.client.ReportServerMetrics(ctx, &panel.ServerMetricsReport{
 		SchemaVersion:  1,
 		AgentSessionID: a.sessionID,
 		Sequence:       a.sequence,
@@ -123,15 +142,94 @@ func (a *MetricsAgent) report(ctx context.Context) error {
 		CPUPercent:     cpu,
 		MemoryPercent:  memory,
 		DiskPercent:    disk,
-	}); err != nil {
+	})
+	if err != nil {
 		if errors.Is(err, panel.ErrMetricsUnsupported) {
 			a.unsupported = true
 			log.Info("控制面未启用实时指标接口，已停止本进程的指标上报")
 			return nil
 		}
 		a.warnRateLimited("report", "Report server realtime metrics failed", err)
+		return nil
 	}
+	a.applyBudgetDirective(directive, interfaceName, txBytes, rxBytes)
 	// Metrics are best effort and must never stop the periodic task or proxy runtime.
+	return nil
+}
+
+func (a *MetricsAgent) applyBudgetDirective(
+	directive *panel.ServerTrafficBudgetDirective,
+	interfaceName string,
+	uploadTotal uint64,
+	downloadTotal uint64,
+) {
+	if directive == nil {
+		return
+	}
+	a.budgetMu.Lock()
+	a.budgetDirective = directive
+	a.baselineUpload = uploadTotal
+	a.baselineDownload = downloadTotal
+	a.budgetInterface = interfaceName
+	a.budgetMu.Unlock()
+
+	if a.core != nil {
+		a.core.SetTrafficSuspended(
+			directive.Enabled &&
+				directive.Mode == "enforce" &&
+				directive.Action == "suspend",
+		)
+	}
+}
+
+func (a *MetricsAgent) enforceBudget(_ context.Context) error {
+	a.budgetMu.Lock()
+	directive := a.budgetDirective
+	interfaceName := a.budgetInterface
+	baselineUpload := a.baselineUpload
+	baselineDownload := a.baselineDownload
+	a.budgetMu.Unlock()
+	if directive == nil ||
+		!directive.Enabled ||
+		directive.Mode != "enforce" ||
+		directive.SuspendAtBytes == 0 ||
+		directive.Action == "suspend" {
+		return nil
+	}
+
+	downloadTotal, uploadTotal, err := readNetworkCounters(interfaceName)
+	if err != nil {
+		if a.core != nil {
+			a.core.SetTrafficSuspended(true)
+		}
+		a.warnRateLimited(
+			"budget-counter",
+			"Server traffic budget counter failed; proxy traffic was suspended",
+			err,
+		)
+		return nil
+	}
+	if uploadTotal < baselineUpload || downloadTotal < baselineDownload {
+		if a.core != nil {
+			a.core.SetTrafficSuspended(true)
+		}
+		a.warnRateLimited(
+			"budget-counter-reset",
+			"Server traffic counters moved backwards; proxy traffic was suspended",
+			errors.New("physical network counters reset before a control-plane report"),
+		)
+		return nil
+	}
+	localUsed := directive.UsedBytes +
+		(uploadTotal - baselineUpload) +
+		(downloadTotal - baselineDownload)
+	if localUsed >= directive.SuspendAtBytes && a.core != nil {
+		a.core.SetTrafficSuspended(true)
+		log.WithFields(log.Fields{
+			"used_bytes":       localUsed,
+			"suspend_at_bytes": directive.SuspendAtBytes,
+		}).Error("服务器物理流量达到硬熔断阈值，已暂停代理流量")
+	}
 	return nil
 }
 

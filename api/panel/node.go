@@ -14,6 +14,9 @@ type NodeInfo struct {
 	AccessAuditEnabled     bool
 	PresenceMode           string
 	PresenceLeaseTTL       int
+	QuotaLeaseMode         string
+	QuotaLeaseTTL          int
+	QuotaLeaseGrantBytes   int64
 	PullInterval           int
 	TrafficReportThreshold int
 	Protocol               *Protocol

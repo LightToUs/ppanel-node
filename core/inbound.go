@@ -334,10 +334,24 @@ func buildShadowsocks(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourC
 	}
 	randomPasswd := hex.EncodeToString(p)
 
-	if nodeInfo.Protocol.ServerKey != "" && strings.Contains(cipher, "2022") {
-		nodeInfo.Protocol.ServerKey = base64.StdEncoding.EncodeToString([]byte(nodeInfo.Protocol.ServerKey))
-		settings.Password = nodeInfo.Protocol.ServerKey
-		randomPasswd = base64.StdEncoding.EncodeToString([]byte(randomPasswd))
+	if strings.Contains(cipher, "2022") {
+		keyLength, keyErr := shadowsocks2022KeyLength(cipher)
+		if keyErr != nil {
+			return keyErr
+		}
+		serverKey, keyErr := normalizeShadowsocks2022Key(
+			nodeInfo.Protocol.ServerKey,
+			keyLength,
+		)
+		if keyErr != nil {
+			return fmt.Errorf("normalize Shadowsocks 2022 server key: %w", keyErr)
+		}
+		defaultUserKey := make([]byte, keyLength)
+		if _, keyErr = rand.Read(defaultUserKey); keyErr != nil {
+			return fmt.Errorf("generate Shadowsocks 2022 default user key: %w", keyErr)
+		}
+		settings.Password = serverKey
+		randomPasswd = base64.StdEncoding.EncodeToString(defaultUserKey)
 		cipher = ""
 	}
 	defaultSSuser := &coreConf.ShadowsocksUserConfig{

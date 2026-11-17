@@ -93,18 +93,17 @@ func (vc *XrayCore) DelUsers(users []panel.UserInfo, tag string, _ *panel.NodeIn
 	defer vc.users.mapLock.Unlock()
 	for i := range users {
 		user = format.UserTag(tag, users[i].Uuid)
+		value, _ := vc.dispatcher.LinkManagers.LoadOrStore(user, dispatcher.NewLinkManager())
+		linkManager := value.(*dispatcher.LinkManager)
+		linkManager.CloseAll()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		err = userManager.RemoveUser(ctx, user)
 		cancel()
 		if err != nil {
+			vc.dispatcher.LinkManagers.Store(user, dispatcher.NewLinkManager())
 			return err
 		}
 		uid := vc.users.uidMap[user]
-		if v, ok := vc.dispatcher.LinkManagers.Load(user); ok {
-			lm := v.(*dispatcher.LinkManager)
-			lm.CloseAll()
-			vc.dispatcher.LinkManagers.Delete(user)
-		}
 		if v, ok := vc.dispatcher.Counter.Load(tag); ok {
 			tc := v.(*counter.TrafficCounter)
 			if value, exists := tc.Counters.Load(user); exists {
@@ -299,6 +298,7 @@ func (v *XrayCore) AddUsers(p *AddUsersParams) (added int, err error) {
 			return added, err
 		}
 		v.users.uidMap[u.Email] = p.Users[added].Id
+		v.dispatcher.LinkManagers.Store(u.Email, dispatcher.NewLinkManager())
 		added++
 	}
 	return added, nil

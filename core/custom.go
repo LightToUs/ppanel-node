@@ -290,7 +290,7 @@ func buildOutboundSettings(item panel.Outbound) (string, *json.RawMessage, error
 	case "tuic":
 		settings["address"] = strings.TrimSpace(item.Address)
 		settings["port"] = item.Port
-		settings["uuid"] = firstNonEmpty(item.UUID, item.Password)
+		settings["id"] = firstNonEmpty(item.UUID, item.Password)
 		settings["password"] = item.Password
 		if congestion := strings.TrimSpace(item.CongestionController); congestion != "" {
 			settings["congestionControl"] = congestion

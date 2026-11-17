@@ -22,6 +22,8 @@ type UserInfo struct {
 	Uuid                string   `json:"uuid"`
 	SpeedLimit          int      `json:"speed_limit"`
 	DeviceLimit         int      `json:"device_limit"`
+	QuotaRequired       bool     `json:"quota_required"`
+	QuotaEpoch          int64    `json:"quota_epoch"`
 	Placeholder         bool     `json:"placeholder"`
 	PeerId              string   `json:"peer_id"`
 	PublicKey           string   `json:"public_key"`

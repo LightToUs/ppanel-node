@@ -10,6 +10,7 @@ import (
 	"github.com/lighttous/ppanel-node/common/task"
 	vCore "github.com/lighttous/ppanel-node/core"
 	"github.com/lighttous/ppanel-node/limiter"
+	nodequota "github.com/lighttous/ppanel-node/quota"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -30,6 +31,7 @@ type Controller struct {
 	portHopping             *portHoppingManager
 	accessEvents            *accessEventStore
 	trafficBatches          *trafficBatchStore
+	quotaManager            *nodequota.Manager
 	statePath               string
 	trafficReportMu         sync.Mutex
 	pendingTrafficBatch     *vCore.UserTrafficBatch
@@ -59,6 +61,7 @@ func (c *Controller) Start() error {
 	var portHoppingAdded bool
 	var accessStoreOpened bool
 	var trafficStoreOpened bool
+	var quotaManagerOpened bool
 	defer func() {
 		if err == nil {
 			return
@@ -97,6 +100,13 @@ func (c *Controller) Start() error {
 			}
 			c.trafficBatches = nil
 		}
+		if quotaManagerOpened && c.quotaManager != nil {
+			if closeErr := c.quotaManager.Close(); closeErr != nil {
+				log.WithFields(log.Fields{"tag": c.tag, "err": closeErr}).
+					Error("Start rollback: close quota manager failed")
+			}
+			c.quotaManager = nil
+		}
 		c.started = false
 	}()
 
@@ -122,10 +132,27 @@ func (c *Controller) Start() error {
 	if err != nil {
 		return fmt.Errorf("load pending traffic batch: %w", err)
 	}
+	c.quotaManager, err = nodequota.Open(
+		c.statePath,
+		c.info.Id,
+		c.info.Type,
+		c.info.QuotaLeaseMode,
+		int64(c.info.QuotaLeaseTTL),
+		c.info.QuotaLeaseGrantBytes,
+		c.apiClient,
+	)
+	if err != nil {
+		return fmt.Errorf("open quota manager: %w", err)
+	}
+	quotaManagerOpened = true
+	if err = c.quotaManager.UpdateUsers(c.userList); err != nil {
+		return fmt.Errorf("persist initial quota users: %w", err)
+	}
 
 	// add limiter
 	l := limiter.AddLimiter(c.tag, c.userList, c.aliveMap)
 	c.limiter = l
+	c.limiter.SetQuotaProvider(c.quotaManager.Budget)
 	limiterAdded = true
 	c.limiter.SetOnlineWindow(accessEventIdleWindow(c.info))
 	presenceMode := normalizedPresenceMode(c.info.PresenceMode)
@@ -220,6 +247,10 @@ func (c *Controller) Close() error {
 	if c.trafficBatches != nil {
 		closeErr = errors.Join(closeErr, c.trafficBatches.Close())
 		c.trafficBatches = nil
+	}
+	if c.quotaManager != nil {
+		closeErr = errors.Join(closeErr, c.quotaManager.Close())
+		c.quotaManager = nil
 	}
 	if c.portHopping != nil {
 		closeErr = errors.Join(closeErr, c.portHopping.Close())

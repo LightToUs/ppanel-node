@@ -11,18 +11,20 @@ import (
 )
 
 type Node struct {
-	controllers []*Controller
-	relayAgent  *RelayAgent
+	controllers  []*Controller
+	relayAgent   *RelayAgent
+	metricsAgent *MetricsAgent
 }
 
 func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConfigResponse) (*Node, error) {
 	serverType := strings.ToLower(strings.TrimSpace(serverconfig.Data.ServerType))
 	if serverType == "relay_egress" {
 		client, err := panel.NewClientV1(&conf.NodeApiConfig{
-			APIHost:   config.ApiConfig.ApiHost,
-			NodeType:  "relay_egress",
-			NodeID:    config.ApiConfig.ServerId,
-			SecretKey: config.ApiConfig.SecretKey,
+			APIHost:           config.ApiConfig.ApiHost,
+			NodeType:          "relay_egress",
+			NodeID:            config.ApiConfig.ServerId,
+			ManagedInstanceID: config.ApiConfig.ManagedInstanceID,
+			SecretKey:         config.ApiConfig.SecretKey,
 		})
 		if err != nil {
 			return nil, err
@@ -40,10 +42,22 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 				pushInterval,
 				core,
 			),
+			metricsAgent: NewMetricsAgent(client, core, ""),
 		}, nil
 	}
+	metricsClient, err := panel.NewClientV1(&conf.NodeApiConfig{
+		APIHost:           config.ApiConfig.ApiHost,
+		NodeType:          "metrics",
+		NodeID:            config.ApiConfig.ServerId,
+		ManagedInstanceID: config.ApiConfig.ManagedInstanceID,
+		SecretKey:         config.ApiConfig.SecretKey,
+	})
+	if err != nil {
+		return nil, err
+	}
 	node := &Node{
-		controllers: make([]*Controller, len(*serverconfig.Data.Protocols)),
+		controllers:  make([]*Controller, len(*serverconfig.Data.Protocols)),
+		metricsAgent: NewMetricsAgent(metricsClient, core, ""),
 	}
 	pushinterval := serverconfig.Data.PushInterval
 	if pushinterval <= 0 {
@@ -62,15 +76,19 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 			AccessAuditEnabled:     serverconfig.Data.AccessAuditEnabled,
 			PresenceMode:           serverconfig.Data.PresenceMode,
 			PresenceLeaseTTL:       serverconfig.Data.PresenceLeaseTTL,
+			QuotaLeaseMode:         serverconfig.Data.QuotaLeaseMode,
+			QuotaLeaseTTL:          serverconfig.Data.QuotaLeaseTTL,
+			QuotaLeaseGrantBytes:   serverconfig.Data.QuotaLeaseGrantBytes,
 			PushInterval:           pushinterval,
 			PullInterval:           pullinterval,
 			Protocol:               &nodeconfig,
 		}
 		p, err := panel.NewClientV1(&conf.NodeApiConfig{
-			APIHost:   config.ApiConfig.ApiHost,
-			NodeType:  nodeconfig.Type,
-			NodeID:    config.ApiConfig.ServerId,
-			SecretKey: config.ApiConfig.SecretKey,
+			APIHost:           config.ApiConfig.ApiHost,
+			NodeType:          nodeconfig.Type,
+			NodeID:            config.ApiConfig.ServerId,
+			ManagedInstanceID: config.ApiConfig.ManagedInstanceID,
+			SecretKey:         config.ApiConfig.SecretKey,
 		})
 		if err != nil {
 			return nil, err
@@ -97,7 +115,13 @@ func normalizeProtocolForRuntime(protocol *panel.Protocol) {
 
 func (n *Node) Start() error {
 	if n.relayAgent != nil {
-		return n.relayAgent.Start()
+		if err := n.relayAgent.Start(); err != nil {
+			return err
+		}
+		if n.metricsAgent != nil {
+			n.metricsAgent.Start()
+		}
+		return nil
 	}
 	for i := range n.controllers {
 		if !n.controllers[i].info.Protocol.Enable {
@@ -115,6 +139,9 @@ func (n *Node) Start() error {
 				err)
 		}
 	}
+	if n.metricsAgent != nil {
+		n.metricsAgent.Start()
+	}
 	return nil
 }
 
@@ -123,6 +150,10 @@ func (n *Node) Close() error {
 		return nil
 	}
 	var closeErr error
+	if n.metricsAgent != nil {
+		n.metricsAgent.Close()
+		n.metricsAgent = nil
+	}
 	if n.relayAgent != nil {
 		closeErr = errors.Join(closeErr, n.relayAgent.Close())
 		n.relayAgent = nil
