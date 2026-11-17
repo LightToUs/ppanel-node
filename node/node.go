@@ -1,9 +1,11 @@
 package node
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/lighttous/ppanel-node/api/panel"
 	"github.com/lighttous/ppanel-node/conf"
@@ -114,6 +116,14 @@ func normalizeProtocolForRuntime(protocol *panel.Protocol) {
 }
 
 func (n *Node) Start() error {
+	if n.metricsAgent != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err := n.metricsAgent.Prime(ctx)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("initialize server traffic budget: %w", err)
+		}
+	}
 	if n.relayAgent != nil {
 		if err := n.relayAgent.Start(); err != nil {
 			return err

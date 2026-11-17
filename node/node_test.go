@@ -1,6 +1,8 @@
 package node
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -22,6 +24,34 @@ func TestNodeCloseIgnoresUnstartedControllers(t *testing.T) {
 	}
 	if n.controllers != nil {
 		t.Fatalf("controllers = %#v, want nil after close", n.controllers)
+	}
+}
+
+func TestNodeStartRequiresInitialMetricsDirective(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(server.Close)
+	client, err := panel.NewClientV1(&conf.NodeApiConfig{
+		APIHost:   server.URL,
+		NodeID:    9,
+		NodeType:  "metrics",
+		SecretKey: "secret",
+	})
+	if err != nil {
+		t.Fatalf("NewClientV1() error = %v", err)
+	}
+	agent := NewMetricsAgent(client, nil, "eth0")
+	agent.readCounters = func(string) (uint64, uint64, error) {
+		return 100, 200, nil
+	}
+	n := &Node{metricsAgent: agent}
+
+	if err = n.Start(); err == nil {
+		t.Fatal("Start() accepted a failed initial traffic budget sync")
+	}
+	if n.metricsAgent.reportTask != nil || n.metricsAgent.guardTask != nil {
+		t.Fatal("periodic metrics tasks started before the initial directive")
 	}
 }
 
