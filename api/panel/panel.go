@@ -97,9 +97,10 @@ func NewClientV1(c *conf.NodeApiConfig) (*ClientV1, error) {
 	}
 	// set params
 	client.SetQueryParams(map[string]string{
-		"protocol":   c.NodeType,
-		"server_id":  strconv.Itoa(c.NodeID),
-		"secret_key": c.SecretKey,
+		"protocol":            c.NodeType,
+		"server_id":           strconv.Itoa(c.NodeID),
+		"managed_instance_id": strconv.FormatInt(c.ManagedInstanceID, 10),
+		"secret_key":          c.SecretKey,
 	})
 	return &ClientV1{
 		Client:            client,
@@ -134,7 +135,8 @@ func NewClientV2(c *conf.ServerApiConfig) *ClientV2 {
 		"X-Node-Capabilities": nodeCapabilities,
 	})
 	client.SetQueryParams(map[string]string{
-		"secret_key": c.SecretKey,
+		"managed_instance_id": strconv.FormatInt(c.ManagedInstanceID, 10),
+		"secret_key":          c.SecretKey,
 	})
 	return &ClientV2{
 		Client:    client,

@@ -41,6 +41,8 @@ type MetricsAgent struct {
 	budgetInterface   string
 	warningAt         map[string]time.Time
 	unsupported       bool
+	certificateMu     sync.RWMutex
+	certificateSource func() []panel.CertificateStatusReport
 }
 
 func NewMetricsAgent(
@@ -55,6 +57,17 @@ func NewMetricsAgent(
 		sessionID:         uuid.NewString(),
 		warningAt:         make(map[string]time.Time),
 	}
+}
+
+func (a *MetricsAgent) SetCertificateSource(
+	source func() []panel.CertificateStatusReport,
+) {
+	if a == nil {
+		return
+	}
+	a.certificateMu.Lock()
+	a.certificateSource = source
+	a.certificateMu.Unlock()
 }
 
 func (a *MetricsAgent) Start() {
@@ -142,6 +155,7 @@ func (a *MetricsAgent) report(ctx context.Context) error {
 		CPUPercent:     cpu,
 		MemoryPercent:  memory,
 		DiskPercent:    disk,
+		Certificates:   a.certificateReports(),
 	})
 	if err != nil {
 		if errors.Is(err, panel.ErrMetricsUnsupported) {
@@ -155,6 +169,16 @@ func (a *MetricsAgent) report(ctx context.Context) error {
 	a.applyBudgetDirective(directive, interfaceName, txBytes, rxBytes)
 	// Metrics are best effort and must never stop the periodic task or proxy runtime.
 	return nil
+}
+
+func (a *MetricsAgent) certificateReports() []panel.CertificateStatusReport {
+	a.certificateMu.RLock()
+	source := a.certificateSource
+	a.certificateMu.RUnlock()
+	if source == nil {
+		return nil
+	}
+	return source()
 }
 
 func (a *MetricsAgent) applyBudgetDirective(

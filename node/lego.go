@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-acme/lego/v4/certificate"
@@ -26,6 +27,13 @@ import (
 	"github.com/lighttous/ppanel-node/api/panel"
 	"github.com/lighttous/ppanel-node/common/file"
 )
+
+const (
+	certificateEnvironmentPath    = "/etc/PPanel-node/certificate.env"
+	maxCertificateEnvironmentSize = 64 << 10
+)
+
+var certificateEnvironmentMu sync.Mutex
 
 type Lego struct {
 	client *lego.Client
@@ -78,27 +86,121 @@ func (l *Lego) SetProvider() error {
 			return err
 		}
 	case "dns":
-		DnsEnvString := strings.Split(l.info.Protocol.CertDNSEnv, "\n")
-		DnsEnv := make(map[string]string)
-		for _, line := range DnsEnvString {
-			parts := strings.SplitN(line, "=", 2)
-			if len(parts) == 2 {
-				DnsEnv[parts[0]] = parts[1]
+		environment, err := parseCertificateEnvironment(l.info.Protocol.CertDNSEnv)
+		if err != nil {
+			return err
+		}
+		fileEnvironment, err := loadCertificateEnvironment(certificateEnvironmentPath)
+		if err != nil {
+			return err
+		}
+		for key, value := range fileEnvironment {
+			environment[key] = value
+		}
+		return withCertificateEnvironment(environment, func() error {
+			p, providerErr := dns.NewDNSChallengeProviderByName(
+				l.info.Protocol.CertDNSProvider,
+			)
+			if providerErr != nil {
+				return fmt.Errorf("create dns challenge provider error: %s", providerErr)
 			}
-		}
-		for k, v := range DnsEnv {
-			os.Setenv(k, v)
-		}
-		p, err := dns.NewDNSChallengeProviderByName(l.info.Protocol.CertDNSProvider)
-		if err != nil {
-			return fmt.Errorf("create dns challenge provider error: %s", err)
-		}
-		err = l.client.Challenge.SetDNS01Provider(p)
-		if err != nil {
-			return fmt.Errorf("set dns provider error: %s", err)
-		}
+			if providerErr = l.client.Challenge.SetDNS01Provider(p); providerErr != nil {
+				return fmt.Errorf("set dns provider error: %s", providerErr)
+			}
+			return nil
+		})
 	}
 	return nil
+}
+
+func loadCertificateEnvironment(filePath string) (map[string]string, error) {
+	info, err := os.Stat(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return map[string]string{}, nil
+		}
+		return nil, fmt.Errorf("stat certificate environment: %w", err)
+	}
+	if info.Mode().Perm()&0077 != 0 {
+		return nil, fmt.Errorf("certificate environment permissions must be 0600 or stricter")
+	}
+	if info.Size() > maxCertificateEnvironmentSize {
+		return nil, fmt.Errorf("certificate environment exceeds the size limit")
+	}
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("read certificate environment: %w", err)
+	}
+	return parseCertificateEnvironment(string(content))
+}
+
+func parseCertificateEnvironment(content string) (map[string]string, error) {
+	environment := make(map[string]string)
+	for lineNumber, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 || !validCertificateEnvironmentKey(parts[0]) {
+			return nil, fmt.Errorf(
+				"invalid certificate environment entry on line %d",
+				lineNumber+1,
+			)
+		}
+		if strings.ContainsRune(parts[1], '\x00') {
+			return nil, fmt.Errorf(
+				"invalid certificate environment value on line %d",
+				lineNumber+1,
+			)
+		}
+		environment[parts[0]] = parts[1]
+	}
+	return environment, nil
+}
+
+func validCertificateEnvironmentKey(value string) bool {
+	if value == "" || !((value[0] >= 'A' && value[0] <= 'Z') || value[0] == '_') {
+		return false
+	}
+	for i := 1; i < len(value); i++ {
+		if (value[i] < 'A' || value[i] > 'Z') &&
+			(value[i] < '0' || value[i] > '9') &&
+			value[i] != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+func withCertificateEnvironment(values map[string]string, run func() error) error {
+	certificateEnvironmentMu.Lock()
+	defer certificateEnvironmentMu.Unlock()
+	previous := make(map[string]*string, len(values))
+	for key, value := range values {
+		if current, exists := os.LookupEnv(key); exists {
+			saved := current
+			previous[key] = &saved
+		} else {
+			previous[key] = nil
+		}
+		if err := os.Setenv(key, value); err != nil {
+			restoreCertificateEnvironment(previous)
+			return fmt.Errorf("set certificate environment %q: %w", key, err)
+		}
+	}
+	defer restoreCertificateEnvironment(previous)
+	return run()
+}
+
+func restoreCertificateEnvironment(previous map[string]*string) {
+	for key, value := range previous {
+		if value == nil {
+			_ = os.Unsetenv(key)
+			continue
+		}
+		_ = os.Setenv(key, *value)
+	}
 }
 
 func (l *Lego) CreateCert() (err error) {
@@ -170,7 +272,7 @@ func (l *Lego) writeCert(certificates *certificate.Resource) error {
 	if err != nil {
 		return fmt.Errorf("check path error: %s", err)
 	}
-	err = os.WriteFile(keyFile, certificates.PrivateKey, 0644)
+	err = os.WriteFile(keyFile, certificates.PrivateKey, 0600)
 	if err != nil {
 		return err
 	}

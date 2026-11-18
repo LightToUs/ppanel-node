@@ -10,20 +10,28 @@ import (
 var ErrMetricsUnsupported = errors.New("control plane does not support realtime metrics")
 
 type ServerMetricsReport struct {
-	SchemaVersion     int     `json:"schema_version"`
-	ManagedInstanceID int64   `json:"managed_instance_id,omitempty"`
-	AgentSessionID    string  `json:"agent_session_id"`
-	Sequence          uint64  `json:"sequence"`
-	CollectedAt       int64   `json:"collected_at"`
-	BootID            string  `json:"boot_id"`
-	BootTime          int64   `json:"boot_time"`
-	UptimeSeconds     uint64  `json:"uptime_seconds"`
-	InterfaceName     string  `json:"interface_name"`
-	UploadBytes       uint64  `json:"upload_bytes"`
-	DownloadBytes     uint64  `json:"download_bytes"`
-	CPUPercent        float64 `json:"cpu_percent"`
-	MemoryPercent     float64 `json:"memory_percent"`
-	DiskPercent       float64 `json:"disk_percent"`
+	SchemaVersion     int                       `json:"schema_version"`
+	ManagedInstanceID int64                     `json:"managed_instance_id,omitempty"`
+	AgentSessionID    string                    `json:"agent_session_id"`
+	Sequence          uint64                    `json:"sequence"`
+	CollectedAt       int64                     `json:"collected_at"`
+	BootID            string                    `json:"boot_id"`
+	BootTime          int64                     `json:"boot_time"`
+	UptimeSeconds     uint64                    `json:"uptime_seconds"`
+	InterfaceName     string                    `json:"interface_name"`
+	UploadBytes       uint64                    `json:"upload_bytes"`
+	DownloadBytes     uint64                    `json:"download_bytes"`
+	CPUPercent        float64                   `json:"cpu_percent"`
+	MemoryPercent     float64                   `json:"memory_percent"`
+	DiskPercent       float64                   `json:"disk_percent"`
+	Certificates      []CertificateStatusReport `json:"certificates,omitempty"`
+}
+
+type CertificateStatusReport struct {
+	ProtocolKey string `json:"protocol_key"`
+	Domain      string `json:"domain"`
+	Fingerprint string `json:"fingerprint"`
+	NotAfter    int64  `json:"not_after"`
 }
 
 type ServerTrafficBudgetDirective struct {

@@ -95,8 +95,27 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 		}
 		node.controllers[i] = NewController(core, p, n, config.StatePath)
 	}
+	node.metricsAgent.SetCertificateSource(node.certificateReports)
 
 	return node, nil
+}
+
+func (n *Node) certificateReports() []panel.CertificateStatusReport {
+	if n == nil {
+		return nil
+	}
+	reports := make([]panel.CertificateStatusReport, 0, len(n.controllers))
+	for _, controller := range n.controllers {
+		if controller == nil {
+			continue
+		}
+		report, err := certificateStatusReport(controller.info)
+		if err != nil || report == nil {
+			continue
+		}
+		reports = append(reports, *report)
+	}
+	return reports
 }
 
 func normalizeProtocolForRuntime(protocol *panel.Protocol) {
