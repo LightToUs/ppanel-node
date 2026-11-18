@@ -95,6 +95,7 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 		}
 		node.controllers[i] = NewController(core, p, n, config.StatePath)
 	}
+	node.metricsAgent.SetBusinessProtocols(*serverconfig.Data.Protocols)
 	node.metricsAgent.SetCertificateSource(node.certificateReports)
 
 	return node, nil

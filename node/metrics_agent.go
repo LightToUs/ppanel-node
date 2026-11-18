@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,26 +24,30 @@ import (
 const metricsInterval = 10 * time.Second
 const budgetGuardInterval = time.Second
 const metricsWarningInterval = 5 * time.Minute
+const defaultTrafficSuspensionFile = "/var/lib/PPanel-node/traffic-suspended"
 
 type MetricsAgent struct {
-	client            *panel.ClientV1
-	core              *vCore.XrayCore
-	interfaceOverride string
-	interfaceName     string
-	sessionID         string
-	sequence          uint64
-	reportTask        *task.Task
-	guardTask         *task.Task
-	access            sync.Mutex
-	budgetMu          sync.Mutex
-	budgetDirective   *panel.ServerTrafficBudgetDirective
-	baselineUpload    uint64
-	baselineDownload  uint64
-	budgetInterface   string
-	warningAt         map[string]time.Time
-	unsupported       bool
-	certificateMu     sync.RWMutex
-	certificateSource func() []panel.CertificateStatusReport
+	client             *panel.ClientV1
+	core               *vCore.XrayCore
+	interfaceOverride  string
+	interfaceName      string
+	sessionID          string
+	sequence           uint64
+	reportTask         *task.Task
+	guardTask          *task.Task
+	access             sync.Mutex
+	budgetMu           sync.Mutex
+	budgetDirective    *panel.ServerTrafficBudgetDirective
+	baselineUpload     uint64
+	baselineDownload   uint64
+	budgetInterface    string
+	warningAt          map[string]time.Time
+	warningMu          sync.Mutex
+	unsupported        bool
+	suspensionFirewall *trafficSuspensionFirewall
+	suspensionMu       sync.Mutex
+	certificateMu      sync.RWMutex
+	certificateSource  func() []panel.CertificateStatusReport
 }
 
 func NewMetricsAgent(
@@ -50,12 +55,33 @@ func NewMetricsAgent(
 	core *vCore.XrayCore,
 	interfaceOverride string,
 ) *MetricsAgent {
-	return &MetricsAgent{
+	agent := &MetricsAgent{
 		client:            client,
 		core:              core,
 		interfaceOverride: interfaceOverride,
 		sessionID:         uuid.NewString(),
 		warningAt:         make(map[string]time.Time),
+	}
+	if trafficSuspensionPersisted() {
+		agent.setTrafficSuspended(true)
+	}
+	return agent
+}
+
+func (a *MetricsAgent) SetBusinessProtocols(protocols []panel.Protocol) {
+	if a == nil {
+		return
+	}
+	a.budgetMu.Lock()
+	a.suspensionFirewall = newTrafficSuspensionFirewall(protocols)
+	firewall := a.suspensionFirewall
+	a.budgetMu.Unlock()
+	a.suspensionMu.Lock()
+	defer a.suspensionMu.Unlock()
+	if trafficSuspensionPersisted() {
+		if err := firewall.Apply(); err != nil {
+			log.WithError(err).Error("恢复流量熔断防火墙失败，应用层仍保持暂停")
+		}
 	}
 }
 
@@ -197,13 +223,11 @@ func (a *MetricsAgent) applyBudgetDirective(
 	a.budgetInterface = interfaceName
 	a.budgetMu.Unlock()
 
-	if a.core != nil {
-		a.core.SetTrafficSuspended(
-			directive.Enabled &&
-				directive.Mode == "enforce" &&
-				directive.Action == "suspend",
-		)
-	}
+	a.setTrafficSuspended(
+		directive.Enabled &&
+			directive.Mode == "enforce" &&
+			directive.Action == "suspend",
+	)
 }
 
 func (a *MetricsAgent) enforceBudget(_ context.Context) error {
@@ -223,9 +247,7 @@ func (a *MetricsAgent) enforceBudget(_ context.Context) error {
 
 	downloadTotal, uploadTotal, err := readNetworkCounters(interfaceName)
 	if err != nil {
-		if a.core != nil {
-			a.core.SetTrafficSuspended(true)
-		}
+		a.setTrafficSuspended(true)
 		a.warnRateLimited(
 			"budget-counter",
 			"Server traffic budget counter failed; proxy traffic was suspended",
@@ -234,9 +256,7 @@ func (a *MetricsAgent) enforceBudget(_ context.Context) error {
 		return nil
 	}
 	if uploadTotal < baselineUpload || downloadTotal < baselineDownload {
-		if a.core != nil {
-			a.core.SetTrafficSuspended(true)
-		}
+		a.setTrafficSuspended(true)
 		a.warnRateLimited(
 			"budget-counter-reset",
 			"Server traffic counters moved backwards; proxy traffic was suspended",
@@ -247,8 +267,8 @@ func (a *MetricsAgent) enforceBudget(_ context.Context) error {
 	localUsed := directive.UsedBytes +
 		(uploadTotal - baselineUpload) +
 		(downloadTotal - baselineDownload)
-	if localUsed >= directive.SuspendAtBytes && a.core != nil {
-		a.core.SetTrafficSuspended(true)
+	if localUsed >= directive.SuspendAtBytes {
+		a.setTrafficSuspended(true)
 		log.WithFields(log.Fields{
 			"used_bytes":       localUsed,
 			"suspend_at_bytes": directive.SuspendAtBytes,
@@ -257,12 +277,79 @@ func (a *MetricsAgent) enforceBudget(_ context.Context) error {
 	return nil
 }
 
+func (a *MetricsAgent) setTrafficSuspended(suspended bool) {
+	if a == nil {
+		return
+	}
+	a.suspensionMu.Lock()
+	defer a.suspensionMu.Unlock()
+
+	path := trafficSuspensionFile()
+	if suspended {
+		if a.core != nil {
+			a.core.SetTrafficSuspended(true)
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			log.WithError(err).Error("创建流量熔断状态目录失败")
+		} else {
+			tmp := path + ".tmp"
+			if err := os.WriteFile(tmp, []byte("suspended\n"), 0o600); err != nil {
+				log.WithError(err).Error("写入流量熔断状态失败")
+			} else if err = os.Rename(tmp, path); err != nil {
+				_ = os.Remove(tmp)
+				log.WithError(err).Error("提交流量熔断状态失败")
+			}
+		}
+		a.budgetMu.Lock()
+		firewall := a.suspensionFirewall
+		a.budgetMu.Unlock()
+		if firewall != nil {
+			if err := firewall.Apply(); err != nil {
+				log.WithError(err).Error("应用流量熔断防火墙失败，应用层仍保持暂停")
+			}
+		}
+		return
+	}
+
+	a.budgetMu.Lock()
+	firewall := a.suspensionFirewall
+	a.budgetMu.Unlock()
+	if firewall != nil {
+		if err := firewall.Close(); err != nil {
+			log.WithError(err).Warn("清除流量熔断防火墙失败，继续保持暂停")
+			return
+		}
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		log.WithError(err).Warn("清除流量熔断状态失败，继续保持暂停")
+		return
+	}
+	if a.core != nil {
+		a.core.SetTrafficSuspended(false)
+	}
+}
+
+func trafficSuspensionPersisted() bool {
+	_, err := os.Stat(trafficSuspensionFile())
+	return err == nil
+}
+
+func trafficSuspensionFile() string {
+	if value := strings.TrimSpace(os.Getenv("PPANEL_TRAFFIC_SUSPENSION_FILE")); value != "" {
+		return value
+	}
+	return defaultTrafficSuspensionFile
+}
+
 func (a *MetricsAgent) warnRateLimited(key, message string, err error) {
 	now := time.Now()
+	a.warningMu.Lock()
 	if last, ok := a.warningAt[key]; ok && now.Sub(last) < metricsWarningInterval {
+		a.warningMu.Unlock()
 		return
 	}
 	a.warningAt[key] = now
+	a.warningMu.Unlock()
 	log.WithField("err", err).Warn(message)
 }
 

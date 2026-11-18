@@ -3,6 +3,8 @@ package node
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 
@@ -72,5 +74,29 @@ func TestMetricsAgentDisablesReportingAfterUnsupportedResponse(t *testing.T) {
 	}
 	if !agent.unsupported {
 		t.Fatal("metrics agent was not marked unsupported")
+	}
+}
+
+func TestTrafficSuspensionPersistsAcrossAgentRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "traffic-suspended")
+	t.Setenv("PPANEL_TRAFFIC_SUSPENSION_FILE", path)
+
+	agent := NewMetricsAgent(nil, nil, "")
+	agent.setTrafficSuspended(true)
+	if !trafficSuspensionPersisted() {
+		t.Fatal("traffic suspension marker was not persisted")
+	}
+
+	_ = NewMetricsAgent(nil, nil, "")
+	if !trafficSuspensionPersisted() {
+		t.Fatal("traffic suspension marker was not restored")
+	}
+
+	agent.setTrafficSuspended(false)
+	if trafficSuspensionPersisted() {
+		t.Fatal("traffic suspension marker was not cleared")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("traffic suspension marker still exists: %v", err)
 	}
 }
