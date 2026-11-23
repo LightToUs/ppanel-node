@@ -14,6 +14,7 @@ import (
 
 func restoreRuntimeHooks() {
 	prepareRuntimeFn = prepareRuntime
+	prepareNodeFn = func(nodes *node.Node) error { return nodes.Prepare() }
 	startRuntimeFn = startRuntime
 	shutdownRuntimeFn = shutdownRuntime
 	rollbackRuntimeFn = rollbackRuntime
@@ -121,7 +122,12 @@ func TestReloadRollsBackWhenNewRuntimeStartFails(t *testing.T) {
 		}
 		return nil
 	}
-	rollbackRuntimeFn = func(*conf.Conf, *panel.ServerConfigResponse, chan struct{}) (*core.XrayCore, *node.Node, error) {
+	rollbackRuntimeFn = func(
+		*conf.Conf,
+		*panel.ServerConfigResponse,
+		chan struct{},
+		*node.RuntimeSnapshot,
+	) (*core.XrayCore, *node.Node, error) {
 		return rollbackCore, rollbackNodes, nil
 	}
 	configureLoggingFn = func(*conf.Conf) {
@@ -140,5 +146,48 @@ func TestReloadRollsBackWhenNewRuntimeStartFails(t *testing.T) {
 	}
 	if cleanupNewCalls != 1 {
 		t.Fatalf("cleanup new runtime calls = %d, want 1", cleanupNewCalls)
+	}
+}
+
+func TestReloadKeepsOldRuntimeWhenPreparationFails(t *testing.T) {
+	defer restoreRuntimeHooks()
+	configPath := writeTestConfig(t)
+
+	oldNodes, oldCore := newTestRuntime()
+	newNodes, newCore := newTestRuntime()
+	var oldShutdownCalls int
+	var startCalls int
+
+	prepareRuntimeFn = func(*conf.Conf) (*core.XrayCore, *node.Node, *panel.ServerConfigResponse, error) {
+		return newCore, newNodes, &panel.ServerConfigResponse{
+			Data: &panel.Data{Total: 2},
+		}, nil
+	}
+	prepareNodeFn = func(nodes *node.Node) error {
+		if nodes != newNodes {
+			t.Fatalf("prepared unexpected node runtime")
+		}
+		return errors.New("control plane unavailable")
+	}
+	shutdownRuntimeFn = func(nodes *node.Node, xraycore *core.XrayCore) error {
+		if nodes == oldNodes && xraycore == oldCore {
+			oldShutdownCalls++
+		}
+		return nil
+	}
+	startRuntimeFn = func(*core.XrayCore, *node.Node, *panel.ServerConfigResponse) error {
+		startCalls++
+		return nil
+	}
+
+	err := reload(configPath, &oldNodes, &oldCore)
+	if err == nil || !strings.Contains(err.Error(), "旧实例继续运行") {
+		t.Fatalf("reload() error = %v, want old runtime preservation message", err)
+	}
+	if oldShutdownCalls != 0 {
+		t.Fatalf("old runtime shutdown calls = %d, want 0", oldShutdownCalls)
+	}
+	if startCalls != 0 {
+		t.Fatalf("new runtime start calls = %d, want 0", startCalls)
 	}
 }

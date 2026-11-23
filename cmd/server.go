@@ -26,6 +26,7 @@ var (
 	currentLogFile *os.File
 
 	prepareRuntimeFn   = prepareRuntime
+	prepareNodeFn      = func(nodes *node.Node) error { return nodes.Prepare() }
 	startRuntimeFn     = startRuntime
 	shutdownRuntimeFn  = shutdownRuntime
 	rollbackRuntimeFn  = rollbackRuntime
@@ -207,7 +208,12 @@ func shutdownRuntime(nodes *node.Node, xraycore *core.XrayCore) error {
 	return shutdownErr
 }
 
-func rollbackRuntime(c *conf.Conf, serverconfig *panel.ServerConfigResponse, reloadCh chan struct{}) (*core.XrayCore, *node.Node, error) {
+func rollbackRuntime(
+	c *conf.Conf,
+	serverconfig *panel.ServerConfigResponse,
+	reloadCh chan struct{},
+	snapshot *node.RuntimeSnapshot,
+) (*core.XrayCore, *node.Node, error) {
 	if c == nil || serverconfig == nil {
 		return nil, nil, fmt.Errorf("旧实例上下文不可用")
 	}
@@ -215,6 +221,9 @@ func rollbackRuntime(c *conf.Conf, serverconfig *panel.ServerConfigResponse, rel
 	xraycore.ReloadCh = reloadCh
 	nodes, err := node.New(xraycore, c, serverconfig)
 	if err != nil {
+		return nil, nil, err
+	}
+	if err = nodes.RestoreSnapshot(snapshot); err != nil {
 		return nil, nil, err
 	}
 	if err := startRuntime(xraycore, nodes, serverconfig); err != nil {
@@ -241,14 +250,24 @@ func reload(config string, nodes **node.Node, xcore **core.XrayCore) error {
 	oldServerConfig := oldCore.ServerConfig
 	oldReloadCh := oldCore.ReloadCh
 	newCore.ReloadCh = oldReloadCh
+	if err = prepareNodeFn(newNodes); err != nil {
+		_ = shutdownRuntimeFn(newNodes, newCore)
+		return fmt.Errorf("准备新实例失败，旧实例继续运行: %w", err)
+	}
 	shutdownErr := shutdownRuntimeFn(oldNodes, oldCore)
+	oldSnapshot := oldNodes.Snapshot()
 	if shutdownErr != nil {
 		log.WithField("err", shutdownErr).Warn("关闭旧实例时存在错误，继续尝试启动新实例")
 	}
 	if err := startRuntimeFn(newCore, newNodes, serverconfig); err != nil {
 		log.WithField("err", err).Error("新实例启动失败，尝试回滚旧实例")
 		_ = shutdownRuntimeFn(newNodes, newCore)
-		rollbackCore, rollbackNodes, rollbackErr := rollbackRuntimeFn(oldConf, oldServerConfig, oldReloadCh)
+		rollbackCore, rollbackNodes, rollbackErr := rollbackRuntimeFn(
+			oldConf,
+			oldServerConfig,
+			oldReloadCh,
+			oldSnapshot,
+		)
 		if rollbackErr != nil {
 			if shutdownErr != nil {
 				return fmt.Errorf("关闭旧实例失败: %v; 启动新实例失败: %w; 回滚旧实例失败: %v", shutdownErr, err, rollbackErr)

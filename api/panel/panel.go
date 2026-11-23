@@ -14,8 +14,8 @@ import (
 )
 
 const (
-	nodeVersion      = "v1.7.0-strict-quota"
-	nodeCapabilities = "wireguard-inbound-v1,wg-user-schema-v1,wg-peer-identity-v1,relay-egress-v1,traffic-quota-lease-v1"
+	nodeVersion      = "v1.8.1-runtime-recovery"
+	nodeCapabilities = "wireguard-inbound-v1,wg-user-schema-v1,wg-peer-identity-v1,relay-egress-v1,traffic-quota-lease-v1,traffic-pool-fail-closed-v1"
 )
 
 type ClientV1 struct {

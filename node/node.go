@@ -16,6 +16,16 @@ type Node struct {
 	metricsAgent *MetricsAgent
 }
 
+type ControllerSnapshot struct {
+	Type     string
+	Users    []panel.UserInfo
+	AliveMap map[int]int
+}
+
+type RuntimeSnapshot struct {
+	Controllers []ControllerSnapshot
+}
+
 func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConfigResponse) (*Node, error) {
 	serverType := strings.ToLower(strings.TrimSpace(serverconfig.Data.ServerType))
 	if serverType == "relay_egress" {
@@ -101,6 +111,85 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 	return node, nil
 }
 
+// Prepare fetches remote users and certificates while the current runtime is
+// still serving. After this succeeds, Start only performs local operations.
+func (n *Node) Prepare() error {
+	if n == nil || n.relayAgent != nil {
+		return nil
+	}
+	for _, controller := range n.controllers {
+		if controller == nil || !controller.info.Protocol.Enable {
+			continue
+		}
+		if err := controller.Prepare(); err != nil {
+			return fmt.Errorf(
+				"准备节点 [%s-%s-%d] 失败: %w",
+				controller.apiClient.APIHost,
+				controller.info.Type,
+				controller.info.Id,
+				err,
+			)
+		}
+	}
+	return nil
+}
+
+func (n *Node) Snapshot() *RuntimeSnapshot {
+	if n == nil || n.relayAgent != nil {
+		return &RuntimeSnapshot{}
+	}
+	snapshot := &RuntimeSnapshot{
+		Controllers: make([]ControllerSnapshot, len(n.controllers)),
+	}
+	for i, controller := range n.controllers {
+		if controller == nil {
+			continue
+		}
+		aliveMap := make(map[int]int, len(controller.aliveMap))
+		for userID, value := range controller.aliveMap {
+			aliveMap[userID] = value
+		}
+		snapshot.Controllers[i] = ControllerSnapshot{
+			Type:     controller.info.Type,
+			Users:    cloneUserList(controller.userList),
+			AliveMap: aliveMap,
+		}
+	}
+	return snapshot
+}
+
+// RestoreSnapshot seeds a replacement runtime from the last in-memory state,
+// allowing rollback even while the control plane is unreachable.
+func (n *Node) RestoreSnapshot(snapshot *RuntimeSnapshot) error {
+	if n == nil || n.relayAgent != nil {
+		return nil
+	}
+	if snapshot == nil || len(snapshot.Controllers) != len(n.controllers) {
+		return errors.New("runtime snapshot does not match controller count")
+	}
+	for i, controller := range n.controllers {
+		state := snapshot.Controllers[i]
+		if controller == nil || state.Type != controller.info.Type {
+			return errors.New("runtime snapshot does not match controller protocol")
+		}
+		controller.userList = cloneUserList(state.Users)
+		controller.aliveMap = make(map[int]int, len(state.AliveMap))
+		for userID, value := range state.AliveMap {
+			controller.aliveMap[userID] = value
+		}
+		controller.prepared = true
+	}
+	return nil
+}
+
+func cloneUserList(users []panel.UserInfo) []panel.UserInfo {
+	cloned := append([]panel.UserInfo(nil), users...)
+	for i := range cloned {
+		cloned[i].AllowedIPs = append([]string(nil), users[i].AllowedIPs...)
+	}
+	return cloned
+}
+
 func (n *Node) certificateReports() []panel.CertificateStatusReport {
 	if n == nil {
 		return nil
@@ -172,11 +261,9 @@ func (n *Node) Close() error {
 	var closeErr error
 	if n.metricsAgent != nil {
 		n.metricsAgent.Close()
-		n.metricsAgent = nil
 	}
 	if n.relayAgent != nil {
 		closeErr = errors.Join(closeErr, n.relayAgent.Close())
-		n.relayAgent = nil
 	}
 	for _, c := range n.controllers {
 		if c == nil {
@@ -186,6 +273,5 @@ func (n *Node) Close() error {
 			closeErr = errors.Join(closeErr, err)
 		}
 	}
-	n.controllers = nil
 	return closeErr
 }

@@ -1,12 +1,16 @@
 package node
 
 import (
+	"context"
+	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/lighttous/ppanel-node/api/panel"
 	"github.com/lighttous/ppanel-node/conf"
@@ -78,8 +82,13 @@ func TestMetricsAgentDisablesReportingAfterUnsupportedResponse(t *testing.T) {
 }
 
 func TestTrafficSuspensionPersistsAcrossAgentRestart(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "traffic-suspended")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "traffic-suspended")
 	t.Setenv("PPANEL_TRAFFIC_SUSPENSION_FILE", path)
+	t.Setenv(
+		"PPANEL_TRAFFIC_BUDGET_FILE",
+		filepath.Join(dir, "traffic-budget.json"),
+	)
 
 	agent := NewMetricsAgent(nil, nil, "")
 	agent.setTrafficSuspended(true)
@@ -98,5 +107,86 @@ func TestTrafficSuspensionPersistsAcrossAgentRestart(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("traffic suspension marker still exists: %v", err)
+	}
+}
+
+func TestManagedInstanceStartsFailClosedUntilBudgetArrives(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(
+		"PPANEL_TRAFFIC_SUSPENSION_FILE",
+		filepath.Join(dir, "traffic-suspended"),
+	)
+	t.Setenv(
+		"PPANEL_TRAFFIC_BUDGET_FILE",
+		filepath.Join(dir, "traffic-budget.json"),
+	)
+
+	agent := NewMetricsAgent(
+		&panel.ClientV1{ManagedInstanceID: 42},
+		nil,
+		"",
+	)
+	if !trafficSuspensionPersisted() {
+		t.Fatal("managed instance did not start with traffic suspended")
+	}
+
+	directive := &panel.ServerTrafficBudgetDirective{
+		Enabled:        true,
+		Mode:           "enforce",
+		Action:         "none",
+		LimitBytes:     30_000,
+		UsedBytes:      3_000,
+		SuspendAtBytes: 27_000,
+	}
+	agent.applyBudgetDirective(directive, "eth0", 100, 200)
+	if trafficSuspensionPersisted() {
+		t.Fatal("fresh enforceable budget did not release startup suspension")
+	}
+	persisted, err := loadTrafficBudgetDirective()
+	if err != nil {
+		t.Fatalf("loadTrafficBudgetDirective() error = %v", err)
+	}
+	if persisted.SuspendAtBytes != directive.SuspendAtBytes {
+		t.Fatalf(
+			"persisted suspend threshold = %d, want %d",
+			persisted.SuspendAtBytes,
+			directive.SuspendAtBytes,
+		)
+	}
+
+	agent.budgetMu.Lock()
+	agent.lastBudgetReportAt = time.Now().Add(-metricsFreshnessLimit - time.Second)
+	agent.budgetMu.Unlock()
+	if err = agent.enforceBudget(context.Background()); err != nil {
+		t.Fatalf("enforceBudget() error = %v", err)
+	}
+	if !trafficSuspensionPersisted() {
+		t.Fatal("stale managed budget did not suspend traffic")
+	}
+	agent.applyBudgetDirective(directive, "eth0", 100, 200)
+
+	agent.suspendManagedTrafficOnMetricsFailure(
+		errors.New("control plane unavailable"),
+	)
+	if !trafficSuspensionPersisted() {
+		t.Fatal("managed metrics failure did not suspend traffic")
+	}
+
+	_ = NewMetricsAgent(nil, nil, "")
+	if !trafficSuspensionPersisted() {
+		t.Fatal("persisted budget did not restore fail-closed startup")
+	}
+}
+
+func TestLocalBudgetUsageFailsClosedOnOverflow(t *testing.T) {
+	if _, err := localBudgetUsage(math.MaxUint64-1, 1, 1); err == nil {
+		t.Fatal("localBudgetUsage() accepted an overflowing total")
+	}
+	got, err := localBudgetUsage(1_000, 200, 300)
+	if err != nil {
+		t.Fatalf("localBudgetUsage() error = %v", err)
+	}
+	if got != 1_500 {
+		t.Fatalf("localBudgetUsage() = %d, want 1500", got)
 	}
 }

@@ -31,6 +31,12 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 	log.WithField("节点", c.tag).Info("用户列表监控任务已启动")
 	_ = c.userReportPeriodic.Start(false)
 	log.WithField("节点", c.tag).Info("用户流量报告任务已启动")
+	go func() {
+		if err := c.reportNodeStatus(); err != nil {
+			log.WithFields(log.Fields{"tag": c.tag, "err": err}).
+				Warn("Initial node status report failed")
+		}
+	}()
 	if normalizedPresenceMode(node.PresenceMode) != "disabled" {
 		c.presenceRenewPeriodic = &task.Task{
 			Name:     "presenceRenew",
@@ -245,22 +251,25 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 		}
 	}
 
-	CPU, Mem, Disk, Uptime, err := serverstatus.GetSystemInfo()
-	if err != nil {
-		log.Print(err)
-	}
-	err = c.apiClient.ReportNodeStatus(
-		&panel.NodeStatus{
-			CPU:    CPU,
-			Mem:    Mem,
-			Disk:   Disk,
-			Uptime: Uptime,
-		})
+	err = c.reportNodeStatus()
 	if err != nil {
 		log.Print(err)
 	}
 
 	return nil
+}
+
+func (c *Controller) reportNodeStatus() error {
+	CPU, Mem, Disk, Uptime, err := serverstatus.GetSystemInfo()
+	if err != nil {
+		return err
+	}
+	return c.apiClient.ReportNodeStatus(&panel.NodeStatus{
+		CPU:    CPU,
+		Mem:    Mem,
+		Disk:   Disk,
+		Uptime: Uptime,
+	})
 }
 
 func (c *Controller) reportUserTraffic(ctx context.Context, reportmin int) {

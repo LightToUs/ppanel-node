@@ -19,6 +19,7 @@ type Controller struct {
 	apiClient               *panel.ClientV1
 	tag                     string
 	started                 bool
+	prepared                bool
 	limiter                 *limiter.Limiter
 	userList                []panel.UserInfo
 	aliveMap                map[int]int
@@ -48,6 +49,34 @@ func NewController(core *vCore.XrayCore, api *panel.ClientV1, info *panel.NodeIn
 		controller.statePath = statePath[0]
 	}
 	return controller
+}
+
+// Prepare resolves every control-plane dependency before the runtime releases
+// its existing listeners. Start can then complete without another API request.
+func (c *Controller) Prepare() error {
+	if c == nil || c.prepared {
+		return nil
+	}
+	userList, err := c.apiClient.GetUserList(context.Background())
+	if err != nil {
+		return fmt.Errorf("get user list error: %s", err)
+	}
+	if len(userList) == 0 && c.info.Type != "wireguard" {
+		return errors.New("add users error: not have any user")
+	}
+	aliveMap, err := c.apiClient.GetUserAlive()
+	if err != nil {
+		return fmt.Errorf("failed to get user alive list: %s", err)
+	}
+	if c.info.Protocol.Security == "tls" {
+		if err = c.requestCert(); err != nil {
+			return fmt.Errorf("request cert error: %s", err)
+		}
+	}
+	c.userList = userList
+	c.aliveMap = aliveMap
+	c.prepared = true
+	return nil
 }
 
 // Start implement the Start() function of the service interface
@@ -110,17 +139,8 @@ func (c *Controller) Start() error {
 		c.started = false
 	}()
 
-	// Update user
-	c.userList, err = c.apiClient.GetUserList(context.Background())
-	if err != nil {
-		return fmt.Errorf("get user list error: %s", err)
-	}
-	if len(c.userList) == 0 && c.info.Type != "wireguard" {
-		return errors.New("add users error: not have any user")
-	}
-	c.aliveMap, err = c.apiClient.GetUserAlive()
-	if err != nil {
-		return fmt.Errorf("failed to get user alive list: %s", err)
+	if err = c.Prepare(); err != nil {
+		return err
 	}
 	c.tag = c.buildNodeTag(c.info)
 	c.trafficBatches, err = openTrafficBatchStore(c.statePath, c.info.Id, c.info.Type)
@@ -172,12 +192,6 @@ func (c *Controller) Start() error {
 		c.limiter.SetAccessRecorder(c.recordAccessEvent, accessEventIdleWindow(c.info))
 	}
 
-	if c.info.Protocol.Security == "tls" {
-		err = c.requestCert()
-		if err != nil {
-			return fmt.Errorf("request cert error: %s", err)
-		}
-	}
 	// Add new tag
 	err = c.server.AddNode(c.tag, c.info)
 	if err != nil {

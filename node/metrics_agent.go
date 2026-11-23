@@ -3,8 +3,10 @@ package node
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -23,8 +25,10 @@ import (
 
 const metricsInterval = 10 * time.Second
 const budgetGuardInterval = time.Second
+const metricsFreshnessLimit = 3 * metricsInterval
 const metricsWarningInterval = 5 * time.Minute
 const defaultTrafficSuspensionFile = "/var/lib/PPanel-node/traffic-suspended"
+const defaultTrafficBudgetFile = "/var/lib/PPanel-node/traffic-budget.json"
 
 type MetricsAgent struct {
 	client             *panel.ClientV1
@@ -41,6 +45,7 @@ type MetricsAgent struct {
 	baselineUpload     uint64
 	baselineDownload   uint64
 	budgetInterface    string
+	lastBudgetReportAt time.Time
 	warningAt          map[string]time.Time
 	warningMu          sync.Mutex
 	unsupported        bool
@@ -62,7 +67,17 @@ func NewMetricsAgent(
 		sessionID:         uuid.NewString(),
 		warningAt:         make(map[string]time.Time),
 	}
-	if trafficSuspensionPersisted() {
+	persistedDirective, loadErr := loadTrafficBudgetDirective()
+	if loadErr != nil && !os.IsNotExist(loadErr) {
+		log.WithError(loadErr).Error("读取持久化流量预算失败，托管实例将保持熔断")
+	}
+	if persistedDirective != nil {
+		agent.budgetDirective = persistedDirective
+	}
+	if (client != nil && client.ManagedInstanceID > 0) ||
+		persistedDirective != nil ||
+		(loadErr != nil && !os.IsNotExist(loadErr)) ||
+		trafficSuspensionPersisted() {
 		agent.setTrafficSuspended(true)
 	}
 	return agent
@@ -152,12 +167,14 @@ func (a *MetricsAgent) report(ctx context.Context) error {
 	}
 	interfaceName, err := a.resolveInterface()
 	if err != nil {
+		a.suspendManagedTrafficOnMetricsFailure(err)
 		a.warnRateLimited("resolve-interface", "Resolve metrics network interface failed", err)
 		return nil
 	}
 	rxBytes, txBytes, err := readNetworkCounters(interfaceName)
 	if err != nil {
 		a.interfaceName = ""
+		a.suspendManagedTrafficOnMetricsFailure(err)
 		a.warnRateLimited("read-interface", "Read metrics network counters failed", err)
 		return nil
 	}
@@ -186,15 +203,27 @@ func (a *MetricsAgent) report(ctx context.Context) error {
 	if err != nil {
 		if errors.Is(err, panel.ErrMetricsUnsupported) {
 			a.unsupported = true
+			a.suspendManagedTrafficOnMetricsFailure(err)
 			log.Info("控制面未启用实时指标接口，已停止本进程的指标上报")
 			return nil
 		}
+		a.suspendManagedTrafficOnMetricsFailure(err)
 		a.warnRateLimited("report", "Report server realtime metrics failed", err)
 		return nil
 	}
 	a.applyBudgetDirective(directive, interfaceName, txBytes, rxBytes)
 	// Metrics are best effort and must never stop the periodic task or proxy runtime.
 	return nil
+}
+
+func (a *MetricsAgent) suspendManagedTrafficOnMetricsFailure(err error) {
+	if a == nil ||
+		a.client == nil ||
+		a.client.ManagedInstanceID <= 0 ||
+		err == nil {
+		return
+	}
+	a.setTrafficSuspended(true)
 }
 
 func (a *MetricsAgent) certificateReports() []panel.CertificateStatusReport {
@@ -216,11 +245,17 @@ func (a *MetricsAgent) applyBudgetDirective(
 	if directive == nil {
 		return
 	}
+	if err := persistTrafficBudgetDirective(directive); err != nil {
+		a.setTrafficSuspended(true)
+		log.WithError(err).Error("持久化流量预算失败，代理流量已暂停")
+		return
+	}
 	a.budgetMu.Lock()
 	a.budgetDirective = directive
 	a.baselineUpload = uploadTotal
 	a.baselineDownload = downloadTotal
 	a.budgetInterface = interfaceName
+	a.lastBudgetReportAt = time.Now()
 	a.budgetMu.Unlock()
 
 	a.setTrafficSuspended(
@@ -236,7 +271,20 @@ func (a *MetricsAgent) enforceBudget(_ context.Context) error {
 	interfaceName := a.budgetInterface
 	baselineUpload := a.baselineUpload
 	baselineDownload := a.baselineDownload
+	lastBudgetReportAt := a.lastBudgetReportAt
 	a.budgetMu.Unlock()
+	if a.client != nil &&
+		a.client.ManagedInstanceID > 0 &&
+		(lastBudgetReportAt.IsZero() ||
+			time.Since(lastBudgetReportAt) > metricsFreshnessLimit) {
+		a.setTrafficSuspended(true)
+		a.warnRateLimited(
+			"budget-stale",
+			"Server traffic budget became stale; proxy traffic was suspended",
+			errors.New("no fresh control-plane traffic budget"),
+		)
+		return nil
+	}
 	if directive == nil ||
 		!directive.Enabled ||
 		directive.Mode != "enforce" ||
@@ -264,9 +312,20 @@ func (a *MetricsAgent) enforceBudget(_ context.Context) error {
 		)
 		return nil
 	}
-	localUsed := directive.UsedBytes +
-		(uploadTotal - baselineUpload) +
-		(downloadTotal - baselineDownload)
+	localUsed, err := localBudgetUsage(
+		directive.UsedBytes,
+		uploadTotal-baselineUpload,
+		downloadTotal-baselineDownload,
+	)
+	if err != nil {
+		a.setTrafficSuspended(true)
+		a.warnRateLimited(
+			"budget-overflow",
+			"Server traffic budget overflowed; proxy traffic was suspended",
+			err,
+		)
+		return nil
+	}
 	if localUsed >= directive.SuspendAtBytes {
 		a.setTrafficSuspended(true)
 		log.WithFields(log.Fields{
@@ -275,6 +334,21 @@ func (a *MetricsAgent) enforceBudget(_ context.Context) error {
 		}).Error("服务器物理流量达到硬熔断阈值，已暂停代理流量")
 	}
 	return nil
+}
+
+func localBudgetUsage(
+	reported uint64,
+	uploadDelta uint64,
+	downloadDelta uint64,
+) (uint64, error) {
+	if uploadDelta > math.MaxUint64-reported {
+		return 0, errors.New("server traffic upload exceeds supported range")
+	}
+	used := reported + uploadDelta
+	if downloadDelta > math.MaxUint64-used {
+		return 0, errors.New("server traffic download exceeds supported range")
+	}
+	return used + downloadDelta, nil
 }
 
 func (a *MetricsAgent) setTrafficSuspended(suspended bool) {
@@ -339,6 +413,61 @@ func trafficSuspensionFile() string {
 		return value
 	}
 	return defaultTrafficSuspensionFile
+}
+
+func persistTrafficBudgetDirective(
+	directive *panel.ServerTrafficBudgetDirective,
+) error {
+	path := trafficBudgetFile()
+	if directive == nil || !directive.Enabled || directive.Mode != "enforce" {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove persisted traffic budget: %w", err)
+		}
+		return nil
+	}
+	if directive.SuspendAtBytes == 0 {
+		return errors.New("enforced traffic budget has no suspension threshold")
+	}
+	payload, err := json.Marshal(directive)
+	if err != nil {
+		return fmt.Errorf("encode traffic budget: %w", err)
+	}
+	if err = os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create traffic budget directory: %w", err)
+	}
+	tmp := path + ".tmp"
+	if err = os.WriteFile(tmp, payload, 0o600); err != nil {
+		return fmt.Errorf("write traffic budget: %w", err)
+	}
+	if err = os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("commit traffic budget: %w", err)
+	}
+	return nil
+}
+
+func loadTrafficBudgetDirective() (*panel.ServerTrafficBudgetDirective, error) {
+	payload, err := os.ReadFile(trafficBudgetFile())
+	if err != nil {
+		return nil, err
+	}
+	var directive panel.ServerTrafficBudgetDirective
+	if err = json.Unmarshal(payload, &directive); err != nil {
+		return nil, fmt.Errorf("decode persisted traffic budget: %w", err)
+	}
+	if !directive.Enabled ||
+		directive.Mode != "enforce" ||
+		directive.SuspendAtBytes == 0 {
+		return nil, errors.New("persisted traffic budget is not enforceable")
+	}
+	return &directive, nil
+}
+
+func trafficBudgetFile() string {
+	if value := strings.TrimSpace(os.Getenv("PPANEL_TRAFFIC_BUDGET_FILE")); value != "" {
+		return value
+	}
+	return defaultTrafficBudgetFile
 }
 
 func (a *MetricsAgent) warnRateLimited(key, message string, err error) {

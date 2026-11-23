@@ -339,7 +339,19 @@ install_ppnode() {
         url="${PPNODE_RELEASE_BASE}/${last_version}/ppanel-node-linux-${arch}.zip"
     fi
 
-    if ! curl -fL "$url" | pv -s 30M -W -N "下载进度" > "$staging_dir/ppanel-node-linux.zip"; then
+    local download_succeeded=false
+    if command -v pv >/dev/null 2>&1; then
+        if curl -fL "$url" |
+            pv -s 30M -W -N "下载进度" > "$staging_dir/ppanel-node-linux.zip"; then
+            download_succeeded=true
+        fi
+    else
+        echo -e "${yellow}未检测到 pv，使用 curl 下载进度${plain}"
+        if curl -fL "$url" -o "$staging_dir/ppanel-node-linux.zip"; then
+            download_succeeded=true
+        fi
+    fi
+    if [[ "$download_succeeded" != true ]]; then
         echo -e "${red}下载 PPanel-node ${last_version} 失败${plain}"
         rm -rf "$staging_dir"
         exit 1
