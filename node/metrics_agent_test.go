@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -66,9 +67,13 @@ func TestMetricsAgentDisablesReportingAfterUnsupportedResponse(t *testing.T) {
 		t.Fatalf("NewClientV1() error = %v", err)
 	}
 	agent := NewMetricsAgent(client, nil, "")
+	agent.interfaceOverride = "eth0"
+	agent.readCounters = func(string) (uint64, uint64, error) {
+		return 100, 200, nil
+	}
 
-	if err = agent.report(t.Context()); err != nil {
-		t.Fatalf("first report() error = %v", err)
+	if err = agent.Prime(t.Context()); err != nil {
+		t.Fatalf("Prime() error = %v", err)
 	}
 	if err = agent.report(t.Context()); err != nil {
 		t.Fatalf("second report() error = %v", err)
@@ -188,5 +193,107 @@ func TestLocalBudgetUsageFailsClosedOnOverflow(t *testing.T) {
 	}
 	if got != 1_500 {
 		t.Fatalf("localBudgetUsage() = %d, want 1500", got)
+	}
+}
+
+func TestMetricsAgentPrimeReturnsControlPlaneFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(server.Close)
+
+	client, err := panel.NewClientV1(&conf.NodeApiConfig{
+		APIHost:   server.URL,
+		NodeID:    9,
+		NodeType:  "metrics",
+		SecretKey: "secret",
+	})
+	if err != nil {
+		t.Fatalf("NewClientV1() error = %v", err)
+	}
+	agent := NewMetricsAgent(client, nil, "eth0")
+	agent.readCounters = func(string) (uint64, uint64, error) {
+		return 100, 200, nil
+	}
+
+	if err = agent.Prime(t.Context()); err == nil {
+		t.Fatal("Prime() accepted a failed initial control-plane response")
+	}
+}
+
+func TestMetricsAgentWarningRateLimitIsConcurrentSafe(t *testing.T) {
+	agent := NewMetricsAgent(nil, nil, "")
+	var workers sync.WaitGroup
+	start := make(chan struct{})
+	for range 100 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			agent.warnRateLimited("shared", "test warning", errors.New("test"))
+		}()
+	}
+	close(start)
+	workers.Wait()
+
+	if got := len(agent.warningAt); got != 1 {
+		t.Fatalf("warning entries = %d, want 1", got)
+	}
+}
+
+func TestMetricsAgentStaleGuardCannotOverrideNewDirective(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(
+		"PPANEL_TRAFFIC_SUSPENSION_FILE",
+		filepath.Join(dir, "traffic-suspended"),
+	)
+	t.Setenv(
+		"PPANEL_TRAFFIC_BUDGET_FILE",
+		filepath.Join(dir, "traffic-budget.json"),
+	)
+	agent := NewMetricsAgent(nil, nil, "")
+	agent.budgetDirective = &panel.ServerTrafficBudgetDirective{
+		Enabled:        true,
+		Mode:           "enforce",
+		Action:         "none",
+		UsedBytes:      9,
+		SuspendAtBytes: 10,
+	}
+	agent.budgetGeneration = 1
+	agent.budgetInterface = "eth0"
+
+	counterStarted := make(chan struct{})
+	releaseCounter := make(chan struct{})
+	agent.readCounters = func(string) (uint64, uint64, error) {
+		close(counterStarted)
+		<-releaseCounter
+		return 0, 1, nil
+	}
+
+	done := make(chan struct{})
+	go func() {
+		_ = agent.enforceBudget(t.Context())
+		close(done)
+	}()
+	select {
+	case <-counterStarted:
+	case <-time.After(time.Second):
+		t.Fatal("guard did not start reading counters")
+	}
+	agent.applyBudgetDirective(
+		&panel.ServerTrafficBudgetDirective{Enabled: false, Action: "none"},
+		"eth0",
+		0,
+		0,
+	)
+	close(releaseCounter)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("guard did not finish")
+	}
+
+	if trafficSuspensionPersisted() {
+		t.Fatal("stale guard overrode the newer resume directive")
 	}
 }

@@ -35,6 +35,7 @@ type MetricsAgent struct {
 	core               *vCore.XrayCore
 	interfaceOverride  string
 	interfaceName      string
+	readCounters       func(string) (uint64, uint64, error)
 	sessionID          string
 	sequence           uint64
 	reportTask         *task.Task
@@ -42,6 +43,7 @@ type MetricsAgent struct {
 	access             sync.Mutex
 	budgetMu           sync.Mutex
 	budgetDirective    *panel.ServerTrafficBudgetDirective
+	budgetGeneration   uint64
 	baselineUpload     uint64
 	baselineDownload   uint64
 	budgetInterface    string
@@ -64,6 +66,7 @@ func NewMetricsAgent(
 		client:            client,
 		core:              core,
 		interfaceOverride: interfaceOverride,
+		readCounters:      readNetworkCounters,
 		sessionID:         uuid.NewString(),
 		warningAt:         make(map[string]time.Time),
 	}
@@ -109,6 +112,25 @@ func (a *MetricsAgent) SetCertificateSource(
 	a.certificateMu.Lock()
 	a.certificateSource = source
 	a.certificateMu.Unlock()
+}
+
+// Prime obtains the initial budget directive before proxy traffic is accepted.
+// Unmanaged legacy nodes remain compatible with control planes without metrics.
+func (a *MetricsAgent) Prime(ctx context.Context) error {
+	if a == nil || a.client == nil || a.unsupported {
+		return nil
+	}
+	err := a.collectAndReport(ctx)
+	if errors.Is(err, panel.ErrMetricsUnsupported) {
+		if a.client.ManagedInstanceID > 0 {
+			a.setTrafficSuspended(true)
+			return err
+		}
+		a.unsupported = true
+		log.Info("控制面未启用实时指标接口，已禁用本进程的指标上报")
+		return nil
+	}
+	return err
 }
 
 func (a *MetricsAgent) Start() {
@@ -165,18 +187,30 @@ func (a *MetricsAgent) report(ctx context.Context) error {
 	if a.unsupported {
 		return nil
 	}
-	interfaceName, err := a.resolveInterface()
-	if err != nil {
+	err := a.collectAndReport(ctx)
+	if errors.Is(err, panel.ErrMetricsUnsupported) {
 		a.suspendManagedTrafficOnMetricsFailure(err)
-		a.warnRateLimited("resolve-interface", "Resolve metrics network interface failed", err)
+		a.unsupported = true
+		log.Info("控制面未启用实时指标接口，已停止本进程的指标上报")
 		return nil
 	}
-	rxBytes, txBytes, err := readNetworkCounters(interfaceName)
+	if err != nil {
+		a.suspendManagedTrafficOnMetricsFailure(err)
+		a.warnRateLimited("report", "Report server realtime metrics failed", err)
+	}
+	// Metrics are best effort after the initial directive has been obtained.
+	return nil
+}
+
+func (a *MetricsAgent) collectAndReport(ctx context.Context) error {
+	interfaceName, err := a.resolveInterface()
+	if err != nil {
+		return fmt.Errorf("resolve metrics network interface: %w", err)
+	}
+	rxBytes, txBytes, err := a.readCounters(interfaceName)
 	if err != nil {
 		a.interfaceName = ""
-		a.suspendManagedTrafficOnMetricsFailure(err)
-		a.warnRateLimited("read-interface", "Read metrics network counters failed", err)
-		return nil
+		return fmt.Errorf("read metrics network counters: %w", err)
 	}
 	cpu, memory, disk, uptime, statusErr := serverstatus.GetSystemInfo()
 	if statusErr != nil {
@@ -201,18 +235,9 @@ func (a *MetricsAgent) report(ctx context.Context) error {
 		Certificates:   a.certificateReports(),
 	})
 	if err != nil {
-		if errors.Is(err, panel.ErrMetricsUnsupported) {
-			a.unsupported = true
-			a.suspendManagedTrafficOnMetricsFailure(err)
-			log.Info("控制面未启用实时指标接口，已停止本进程的指标上报")
-			return nil
-		}
-		a.suspendManagedTrafficOnMetricsFailure(err)
-		a.warnRateLimited("report", "Report server realtime metrics failed", err)
-		return nil
+		return err
 	}
 	a.applyBudgetDirective(directive, interfaceName, txBytes, rxBytes)
-	// Metrics are best effort and must never stop the periodic task or proxy runtime.
 	return nil
 }
 
@@ -252,6 +277,7 @@ func (a *MetricsAgent) applyBudgetDirective(
 	}
 	a.budgetMu.Lock()
 	a.budgetDirective = directive
+	a.budgetGeneration++
 	a.baselineUpload = uploadTotal
 	a.baselineDownload = downloadTotal
 	a.budgetInterface = interfaceName
@@ -268,6 +294,7 @@ func (a *MetricsAgent) applyBudgetDirective(
 func (a *MetricsAgent) enforceBudget(_ context.Context) error {
 	a.budgetMu.Lock()
 	directive := a.budgetDirective
+	generation := a.budgetGeneration
 	interfaceName := a.budgetInterface
 	baselineUpload := a.baselineUpload
 	baselineDownload := a.baselineDownload
@@ -277,7 +304,7 @@ func (a *MetricsAgent) enforceBudget(_ context.Context) error {
 		a.client.ManagedInstanceID > 0 &&
 		(lastBudgetReportAt.IsZero() ||
 			time.Since(lastBudgetReportAt) > metricsFreshnessLimit) {
-		a.setTrafficSuspended(true)
+		a.setGuardSuspended(generation, true)
 		a.warnRateLimited(
 			"budget-stale",
 			"Server traffic budget became stale; proxy traffic was suspended",
@@ -293,9 +320,9 @@ func (a *MetricsAgent) enforceBudget(_ context.Context) error {
 		return nil
 	}
 
-	downloadTotal, uploadTotal, err := readNetworkCounters(interfaceName)
+	downloadTotal, uploadTotal, err := a.readCounters(interfaceName)
 	if err != nil {
-		a.setTrafficSuspended(true)
+		a.setGuardSuspended(generation, true)
 		a.warnRateLimited(
 			"budget-counter",
 			"Server traffic budget counter failed; proxy traffic was suspended",
@@ -304,7 +331,7 @@ func (a *MetricsAgent) enforceBudget(_ context.Context) error {
 		return nil
 	}
 	if uploadTotal < baselineUpload || downloadTotal < baselineDownload {
-		a.setTrafficSuspended(true)
+		a.setGuardSuspended(generation, true)
 		a.warnRateLimited(
 			"budget-counter-reset",
 			"Server traffic counters moved backwards; proxy traffic was suspended",
@@ -318,7 +345,7 @@ func (a *MetricsAgent) enforceBudget(_ context.Context) error {
 		downloadTotal-baselineDownload,
 	)
 	if err != nil {
-		a.setTrafficSuspended(true)
+		a.setGuardSuspended(generation, true)
 		a.warnRateLimited(
 			"budget-overflow",
 			"Server traffic budget overflowed; proxy traffic was suspended",
@@ -326,8 +353,8 @@ func (a *MetricsAgent) enforceBudget(_ context.Context) error {
 		)
 		return nil
 	}
-	if localUsed >= directive.SuspendAtBytes {
-		a.setTrafficSuspended(true)
+	if localUsed >= directive.SuspendAtBytes &&
+		a.setGuardSuspended(generation, true) {
 		log.WithFields(log.Fields{
 			"used_bytes":       localUsed,
 			"suspend_at_bytes": directive.SuspendAtBytes,
@@ -358,6 +385,16 @@ func (a *MetricsAgent) setTrafficSuspended(suspended bool) {
 	a.suspensionMu.Lock()
 	defer a.suspensionMu.Unlock()
 
+	a.budgetMu.Lock()
+	firewall := a.suspensionFirewall
+	a.budgetMu.Unlock()
+	a.setTrafficSuspendedLocked(suspended, firewall)
+}
+
+func (a *MetricsAgent) setTrafficSuspendedLocked(
+	suspended bool,
+	firewall *trafficSuspensionFirewall,
+) {
 	path := trafficSuspensionFile()
 	if suspended {
 		if a.core != nil {
@@ -374,9 +411,6 @@ func (a *MetricsAgent) setTrafficSuspended(suspended bool) {
 				log.WithError(err).Error("提交流量熔断状态失败")
 			}
 		}
-		a.budgetMu.Lock()
-		firewall := a.suspensionFirewall
-		a.budgetMu.Unlock()
 		if firewall != nil {
 			if err := firewall.Apply(); err != nil {
 				log.WithError(err).Error("应用流量熔断防火墙失败，应用层仍保持暂停")
@@ -385,9 +419,6 @@ func (a *MetricsAgent) setTrafficSuspended(suspended bool) {
 		return
 	}
 
-	a.budgetMu.Lock()
-	firewall := a.suspensionFirewall
-	a.budgetMu.Unlock()
 	if firewall != nil {
 		if err := firewall.Close(); err != nil {
 			log.WithError(err).Warn("清除流量熔断防火墙失败，继续保持暂停")
@@ -468,6 +499,20 @@ func trafficBudgetFile() string {
 		return value
 	}
 	return defaultTrafficBudgetFile
+}
+
+func (a *MetricsAgent) setGuardSuspended(generation uint64, suspended bool) bool {
+	a.suspensionMu.Lock()
+	defer a.suspensionMu.Unlock()
+	a.budgetMu.Lock()
+	current := generation == a.budgetGeneration
+	firewall := a.suspensionFirewall
+	a.budgetMu.Unlock()
+	if !current {
+		return false
+	}
+	a.setTrafficSuspendedLocked(suspended, firewall)
+	return true
 }
 
 func (a *MetricsAgent) warnRateLimited(key, message string, err error) {

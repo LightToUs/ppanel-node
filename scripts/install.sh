@@ -161,8 +161,14 @@ install_base() {
         
         if [[ ${#missing[@]} -gt 0 ]]; then
             echo "安装缺失的包: ${missing[*]}"
-            apt-get update -y >/dev/null 2>&1
-            DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}" >/dev/null 2>&1
+            if ! apt-get update -y; then
+                echo -e "${red}更新 APT 软件源失败${plain}" >&2
+                return 1
+            fi
+            if ! DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}"; then
+                echo -e "${red}安装必需的软件包失败: ${missing[*]}${plain}" >&2
+                return 1
+            fi
         fi
     }
 
@@ -181,7 +187,10 @@ install_base() {
         
         if [[ ${#missing[@]} -gt 0 ]]; then
             echo "安装缺失的包: ${missing[*]}"
-            yum install -y "${missing[@]}" >/dev/null 2>&1
+            if ! yum install -y "${missing[@]}"; then
+                echo -e "${red}安装必需的软件包失败: ${missing[*]}${plain}" >&2
+                return 1
+            fi
         fi
     }
 
@@ -200,7 +209,10 @@ install_base() {
         
         if [[ ${#missing[@]} -gt 0 ]]; then
             echo "安装缺失的包: ${missing[*]}"
-            apk add --no-cache "${missing[@]}" >/dev/null 2>&1
+            if ! apk add --no-cache "${missing[@]}"; then
+                echo -e "${red}安装必需的软件包失败: ${missing[*]}${plain}" >&2
+                return 1
+            fi
         fi
     }
 
@@ -209,26 +221,43 @@ install_base() {
         # 检查并安装 epel-release
         if ! rpm -q epel-release >/dev/null 2>&1; then
             echo "安装 EPEL 源..."
-            yum install -y epel-release >/dev/null 2>&1
+            if ! yum install -y epel-release; then
+                echo -e "${red}安装 EPEL 软件源失败${plain}" >&2
+                return 1
+            fi
         fi
-        need_install_yum wget curl unzip tar cronie socat ca-certificates pv
+        need_install_yum wget curl unzip tar cronie socat ca-certificates || return 1
         update-ca-trust force-enable >/dev/null 2>&1 || true
     elif [[ x"${release}" == x"alpine" ]]; then
-        need_install_apk wget curl unzip tar socat ca-certificates pv
+        need_install_apk wget curl unzip tar socat ca-certificates || return 1
         update-ca-certificates >/dev/null 2>&1 || true
     elif [[ x"${release}" == x"debian" ]]; then
-        need_install_apt wget curl unzip tar cron socat ca-certificates pv
+        need_install_apt wget curl unzip tar cron socat ca-certificates || return 1
         update-ca-certificates >/dev/null 2>&1 || true
     elif [[ x"${release}" == x"ubuntu" ]]; then
-        need_install_apt wget curl unzip tar cron socat ca-certificates pv
+        need_install_apt wget curl unzip tar cron socat ca-certificates || return 1
         update-ca-certificates >/dev/null 2>&1 || true
     elif [[ x"${release}" == x"arch" ]]; then
         echo "更新包数据库..."
-        pacman -Sy --noconfirm >/dev/null 2>&1
+        if ! pacman -Sy --noconfirm; then
+            echo -e "${red}更新 Pacman 软件源失败${plain}" >&2
+            return 1
+        fi
         # --needed 会跳过已安装的包，非常高效
         echo "安装必需的包..."
-        pacman -S --noconfirm --needed wget curl unzip tar cronie socat ca-certificates pv >/dev/null 2>&1
+        if ! pacman -S --noconfirm --needed wget curl unzip tar cronie socat ca-certificates; then
+            echo -e "${red}安装必需的软件包失败${plain}" >&2
+            return 1
+        fi
     fi
+
+    local required_command
+    for required_command in curl unzip sha256sum; do
+        if ! command -v "$required_command" >/dev/null 2>&1; then
+            echo -e "${red}缺少必需命令: ${required_command}${plain}" >&2
+            return 1
+        fi
+    done
 }
 
 # 0: running, 1: not running, 2: not installed
@@ -526,7 +555,10 @@ EOF
 
 parse_args "$@"
 echo -e "${green}开始安装${plain}"
-install_base
+if ! install_base; then
+    echo -e "${red}安装 PPanel-node 依赖失败，请检查上方包管理器错误${plain}" >&2
+    exit 1
+fi
 install_ppnode "$VERSION_ARG"
 sleep 2
 if ! check_status; then
