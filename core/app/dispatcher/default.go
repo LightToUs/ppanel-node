@@ -567,6 +567,7 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 	routingLink := routing_session.AsRoutingContext(ctx)
 	inTag := routingLink.GetInboundTag()
 	isPickRoute := 0
+	routeRuleTag := ""
 	if forcedOutboundTag := session.GetForcedOutboundTagFromContext(ctx); forcedOutboundTag != "" {
 		ctx = session.SetForcedOutboundTagToContext(ctx, "")
 		if h := d.ohm.GetHandler(forcedOutboundTag); h != nil {
@@ -584,6 +585,7 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 			outTag := route.GetOutboundTag()
 			if h := d.ohm.GetHandler(outTag); h != nil {
 				isPickRoute = 2
+				routeRuleTag = route.GetRuleTag()
 				if route.GetRuleTag() == "" {
 					errors.LogInfo(ctx, "taking detour [", outTag, "] for [", destination, "]")
 				} else {
@@ -613,6 +615,19 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 	}
 
 	ob.Tag = handler.Tag()
+	if strings.HasPrefix(routeRuleTag, "security-") {
+		inbound := session.InboundFromContext(ctx)
+		if inbound != nil && inbound.User != nil {
+			notifyAbuseEvent(AbuseEvent{
+				Category:   strings.TrimPrefix(routeRuleTag, "security-"),
+				InboundTag: inTag,
+				UserTag:    inbound.User.Email,
+				Protocol:   protocol,
+				Target:     ob.Target.String(),
+				OccurredAt: time.Now(),
+			})
+		}
+	}
 	if accessMessage := log.AccessMessageFromContext(ctx); accessMessage != nil {
 		if tag := handler.Tag(); tag != "" {
 			if inTag == "" {

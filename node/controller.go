@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/lighttous/ppanel-node/api/panel"
 	"github.com/lighttous/ppanel-node/common/task"
 	vCore "github.com/lighttous/ppanel-node/core"
+	"github.com/lighttous/ppanel-node/core/app/dispatcher"
 	"github.com/lighttous/ppanel-node/limiter"
 	nodequota "github.com/lighttous/ppanel-node/quota"
 	log "github.com/sirupsen/logrus"
@@ -29,8 +31,16 @@ type Controller struct {
 	renewCertPeriodic       *task.Task
 	onlineIpReportPeriodic  *task.Task
 	presenceRenewPeriodic   *task.Task
+	abuseReportPeriodic     *task.Task
 	portHopping             *portHoppingManager
 	accessEvents            *accessEventStore
+	abuseEvents             *abuseAggregator
+	unregisterAbuseObserver func()
+	pendingAbuseAggregates  []panel.AbuseAggregate
+	abuseDroppedSinceLog    uint64
+	abuseReportFailures     uint64
+	lastAbuseDroppedLogAt   time.Time
+	lastAbuseFailureLogAt   time.Time
 	trafficBatches          *trafficBatchStore
 	quotaManager            *nodequota.Manager
 	statePath               string
@@ -91,9 +101,18 @@ func (c *Controller) Start() error {
 	var accessStoreOpened bool
 	var trafficStoreOpened bool
 	var quotaManagerOpened bool
+	var abuseObserverRegistered bool
 	defer func() {
 		if err == nil {
 			return
+		}
+		if abuseObserverRegistered && c.unregisterAbuseObserver != nil {
+			c.unregisterAbuseObserver()
+			c.unregisterAbuseObserver = nil
+		}
+		if c.abuseEvents != nil {
+			c.abuseEvents.Close()
+			c.abuseEvents = nil
 		}
 		if portHoppingAdded && c.portHopping != nil {
 			if closeErr := c.portHopping.Close(); closeErr != nil {
@@ -143,6 +162,9 @@ func (c *Controller) Start() error {
 		return err
 	}
 	c.tag = c.buildNodeTag(c.info)
+	c.abuseEvents = newAbuseAggregator(c.tag, c.info.Type, c.userList)
+	c.unregisterAbuseObserver = dispatcher.SetAbuseObserver(c.abuseEvents.Observe)
+	abuseObserverRegistered = true
 	c.trafficBatches, err = openTrafficBatchStore(c.statePath, c.info.Id, c.info.Type)
 	if err != nil {
 		return fmt.Errorf("open traffic batch store: %w", err)
@@ -250,6 +272,19 @@ func (c *Controller) Close() error {
 		c.presenceRenewPeriodic.Close()
 		c.presenceRenewPeriodic = nil
 	}
+	if c.abuseReportPeriodic != nil {
+		c.abuseReportPeriodic.Close()
+		c.abuseReportPeriodic = nil
+	}
+	if c.unregisterAbuseObserver != nil {
+		c.unregisterAbuseObserver()
+		c.unregisterAbuseObserver = nil
+	}
+	if c.abuseEvents != nil {
+		c.abuseEvents.Close()
+		c.abuseEvents = nil
+	}
+	c.pendingAbuseAggregates = nil
 	if c.tag != "" {
 		limiter.DeleteLimiter(c.tag)
 	}

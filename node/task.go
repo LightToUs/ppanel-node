@@ -12,6 +12,8 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+const abuseLogInterval = 15 * time.Minute
+
 func (c *Controller) startTasks(node *panel.NodeInfo) {
 	// fetch user list task
 	c.userListMonitorPeriodic = &task.Task{
@@ -27,10 +29,18 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 		Execute:  c.reportUserTrafficTask,
 		ReloadCh: c.server.ReloadCh,
 	}
+	c.abuseReportPeriodic = &task.Task{
+		Name:     "reportAbuseAggregates",
+		Interval: time.Minute,
+		Execute:  c.reportAbuseAggregatesTask,
+		ReloadCh: c.server.ReloadCh,
+	}
 	_ = c.userListMonitorPeriodic.Start(false)
 	log.WithField("节点", c.tag).Info("用户列表监控任务已启动")
 	_ = c.userReportPeriodic.Start(false)
 	log.WithField("节点", c.tag).Info("用户流量报告任务已启动")
+	_ = c.abuseReportPeriodic.Start(false)
+	log.WithField("节点", c.tag).Info("滥用聚合报告任务已启动")
 	go func() {
 		if err := c.reportNodeStatus(); err != nil {
 			log.WithFields(log.Fields{"tag": c.tag, "err": err}).
@@ -85,6 +95,10 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 func (c *Controller) reloadTask() {
 	c.userListMonitorPeriodic.Close()
 	c.userReportPeriodic.Close()
+	if c.abuseReportPeriodic != nil {
+		c.abuseReportPeriodic.Close()
+		c.abuseReportPeriodic = nil
+	}
 	if c.renewCertPeriodic != nil {
 		c.renewCertPeriodic.Close()
 	}
@@ -162,10 +176,51 @@ func (c *Controller) userListMonitor(ctx context.Context) (err error) {
 		c.limiter.UpdateUser(c.tag, append(added, updated...), deleted)
 	}
 	c.userList = newU
+	if c.abuseEvents != nil {
+		c.abuseEvents.UpdateUsers(newU)
+	}
 	if len(added)+len(deleted)+len(updated) != 0 {
 		log.WithField("节点", c.tag).
 			Infof("删除 %d 个用户，新增 %d 个用户，更新 %d 个用户", len(deleted), len(added), len(updated))
 	}
+	return nil
+}
+
+func (c *Controller) reportAbuseAggregatesTask(ctx context.Context) error {
+	if c.abuseEvents == nil {
+		return nil
+	}
+	now := time.Now()
+	c.abuseDroppedSinceLog += c.abuseEvents.Dropped()
+	if c.abuseDroppedSinceLog > 0 &&
+		(c.lastAbuseDroppedLogAt.IsZero() || now.Sub(c.lastAbuseDroppedLogAt) >= abuseLogInterval) {
+		log.WithFields(log.Fields{"tag": c.tag, "dropped": c.abuseDroppedSinceLog}).
+			Warn("Abuse events dropped by bounded aggregator")
+		c.abuseDroppedSinceLog = 0
+		c.lastAbuseDroppedLogAt = now
+	}
+	if len(c.pendingAbuseAggregates) == 0 {
+		c.pendingAbuseAggregates = c.abuseEvents.Take(abuseReportBatchLimit)
+	}
+	if len(c.pendingAbuseAggregates) == 0 {
+		return nil
+	}
+	if err := c.apiClient.ReportAbuseAggregates(ctx, c.pendingAbuseAggregates); err != nil {
+		c.abuseReportFailures++
+		if c.lastAbuseFailureLogAt.IsZero() || now.Sub(c.lastAbuseFailureLogAt) >= abuseLogInterval {
+			log.WithFields(log.Fields{
+				"tag":      c.tag,
+				"count":    len(c.pendingAbuseAggregates),
+				"failures": c.abuseReportFailures,
+				"err":      err,
+			}).Warn("Report abuse aggregates failed; batch retained for retry")
+			c.abuseReportFailures = 0
+			c.lastAbuseFailureLogAt = now
+		}
+		return nil
+	}
+	c.pendingAbuseAggregates = nil
+	c.abuseReportFailures = 0
 	return nil
 }
 

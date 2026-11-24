@@ -60,6 +60,24 @@ type AccessEventBody struct {
 	ReportedAt int64         `json:"reported_at"`
 }
 
+type AbuseAggregate struct {
+	EventID      string `json:"event_id"`
+	UID          int    `json:"uid"`
+	Category     string `json:"category"`
+	Protocol     string `json:"protocol"`
+	Count        uint64 `json:"count"`
+	BucketStart  int64  `json:"bucket_start"`
+	FirstSeenAt  int64  `json:"first_seen_at"`
+	LastSeenAt   int64  `json:"last_seen_at"`
+	SampleTarget string `json:"sample_target,omitempty"`
+}
+
+type AbuseAggregateBody struct {
+	ManagedInstanceID int64            `json:"managed_instance_id,omitempty"`
+	Aggregates        []AbuseAggregate `json:"aggregates"`
+	ReportedAt        int64            `json:"reported_at"`
+}
+
 type AliveMap struct {
 	Alive map[int]int `json:"alive"`
 }
@@ -262,6 +280,33 @@ func (c *ClientV1) ReportAccessEvents(ctx context.Context, events []AccessEvent)
 	}
 	if result.Code != 0 && result.Code != 200 {
 		return fmt.Errorf("report access events failed with business code %d: %s", result.Code, result.Msg)
+	}
+	return nil
+}
+
+func (c *ClientV1) ReportAbuseAggregates(ctx context.Context, aggregates []AbuseAggregate) error {
+	if len(aggregates) == 0 {
+		return nil
+	}
+	const p = "/v2/node/abuse/aggregates"
+	body := AbuseAggregateBody{
+		ManagedInstanceID: c.ManagedInstanceID,
+		Aggregates:        aggregates,
+		ReportedAt:        time.Now().UnixMilli(),
+	}
+	response, err := c.postSignedJSON(ctx, p, body)
+	if err != nil {
+		return err
+	}
+	var result struct {
+		Code uint32 `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	if err = json.Unmarshal(response, &result); err != nil {
+		return fmt.Errorf("decode abuse aggregate response: %w", err)
+	}
+	if result.Code != 0 && result.Code != 200 {
+		return fmt.Errorf("report abuse aggregates failed with business code %d: %s", result.Code, result.Msg)
 	}
 	return nil
 }
