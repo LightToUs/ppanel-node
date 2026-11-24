@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/lighttous/ppanel-node/api/panel"
+	"github.com/xtls/xray-core/app/proxyman"
 	"github.com/xtls/xray-core/proxy/wireguard"
 )
 
@@ -51,5 +52,16 @@ func TestBuildWireGuardInbound(t *testing.T) {
 	}
 	if config.Tag != "wireguard-49" {
 		t.Fatalf("tag = %q", config.Tag)
+	}
+	receiverMessage, err := config.ReceiverSettings.GetInstance()
+	if err != nil {
+		t.Fatalf("decode receiver settings: %v", err)
+	}
+	receiver, ok := receiverMessage.(*proxyman.ReceiverConfig)
+	if !ok {
+		t.Fatalf("receiver settings type = %T", receiverMessage)
+	}
+	if sniffing := receiver.GetSniffingSettings(); sniffing == nil || !sniffing.GetEnabled() {
+		t.Fatal("WireGuard inbound must enable protocol sniffing for security routing")
 	}
 }

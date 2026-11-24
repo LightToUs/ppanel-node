@@ -83,15 +83,15 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 	ipAddress := net.ParseAddress("0.0.0.0")
 	in.ListenOn = &coreConf.Address{Address: ipAddress}
 	in.Tag = tag
-	if nodeInfo.Type == "wireguard" {
-		return in.Build()
-	}
 	// Set SniffingConfig
 	sniffingConfig := &coreConf.SniffingConfig{
 		Enabled:      true,
 		DestOverride: coreConf.StringList{"http", "tls", "quic"},
 	}
 	in.SniffingConfig = sniffingConfig
+	if nodeInfo.Type == "wireguard" {
+		return in.Build()
+	}
 
 	// Set TLS or Reality settings
 	switch nodeInfo.Protocol.Security {

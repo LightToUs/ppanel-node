@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/lighttous/ppanel-node/api/panel"
-	log "github.com/sirupsen/logrus"
 	"github.com/xtls/xray-core/app/dns"
 	"github.com/xtls/xray-core/app/router"
 	xnet "github.com/xtls/xray-core/common/net"
@@ -19,9 +18,6 @@ import (
 func hasPublicIPv6() bool {
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
-		// #region debug-point C:ipv6-detection-error
-		log.WithFields(log.Fields{"sessionId": "japan-a1-dns-errors", "runId": "post-fix", "hypothesisId": "C", "location": "core/custom.go:hasPublicIPv6", "error": err.Error()}).Info("[DEBUG] IPv6 capability detection failed")
-		// #endregion
 		return false
 	}
 	for _, addr := range addrs {
@@ -32,15 +28,9 @@ func hasPublicIPv6() bool {
 		ip := ipNet.IP
 		// Check if it's IPv6, not loopback, not link-local, not private/ULA
 		if ip.To4() == nil && !ip.IsLoopback() && !ip.IsLinkLocalUnicast() && !ip.IsPrivate() {
-			// #region debug-point C:ipv6-detected
-			log.WithFields(log.Fields{"sessionId": "japan-a1-dns-errors", "runId": "post-fix", "hypothesisId": "C", "location": "core/custom.go:hasPublicIPv6", "hasPublicIPv6": true, "matchedAddress": ip.String()}).Info("[DEBUG] IPv6 capability detected")
-			// #endregion
 			return true
 		}
 	}
-	// #region debug-point C:ipv6-not-detected
-	log.WithFields(log.Fields{"sessionId": "japan-a1-dns-errors", "runId": "post-fix", "hypothesisId": "C", "location": "core/custom.go:hasPublicIPv6", "hasPublicIPv6": false, "interfaceAddressCount": len(addrs)}).Info("[DEBUG] IPv6 capability not detected")
-	// #endregion
 	return false
 }
 
@@ -91,6 +81,51 @@ func buildRouteDomains(rules []string) []string {
 		domains = append(domains, value)
 	}
 	return domains
+}
+
+var privateTargetCIDRs = []string{
+	"0.0.0.0/8",
+	"10.0.0.0/8",
+	"100.64.0.0/10",
+	"127.0.0.0/8",
+	"169.254.0.0/16",
+	"172.16.0.0/12",
+	"192.168.0.0/16",
+	"::/128",
+	"::1/128",
+	"fc00::/7",
+	"fe80::/10",
+}
+
+func buildSecurityRules() ([]json.RawMessage, error) {
+	rules := []map[string]interface{}{
+		{
+			"ip":          privateTargetCIDRs,
+			"outboundTag": "block",
+			"ruleTag":     "security-private-network",
+		},
+		{
+			"port":        "25,465,587",
+			"network":     "tcp",
+			"outboundTag": "block",
+			"ruleTag":     "security-smtp",
+		},
+		{
+			"protocol":    []string{"bittorrent"},
+			"outboundTag": "block",
+			"ruleTag":     "security-bittorrent",
+		},
+	}
+
+	result := make([]json.RawMessage, 0, len(rules))
+	for _, rule := range rules {
+		rawRule, err := json.Marshal(rule)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, rawRule)
+	}
+	return result, nil
 }
 
 func normalizeOutboundProtocol(protocol string) string {
@@ -459,9 +494,6 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 	if !hasPublicIPv6() {
 		queryStrategy = "UseIPv4"
 	}
-	// #region debug-point B:generated-dns-strategy
-	log.WithFields(log.Fields{"sessionId": "japan-a1-dns-errors", "runId": "post-fix", "hypothesisId": "B", "location": "core/custom.go:GetCustomConfig", "defaultQueryStrategy": queryStrategy, "customQueryStrategy": ip_strategy, "configuredIPStrategy": serverconfig.Data.IPStrategy}).Info("[DEBUG] Generated DNS strategies")
-	// #endregion
 	coreDnsConfig := &coreConf.DNSConfig{
 		Servers: []*coreConf.NameServerConfig{
 			{
@@ -526,8 +558,11 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 	coreOutboundConfig = append(coreOutboundConfig, dns)
 
 	//default route
-	domainStrategy := "AsIs"
-	ruleList := make([]json.RawMessage, 0)
+	domainStrategy := "IPOnDemand"
+	ruleList, err := buildSecurityRules()
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	if fullRoute.name == "" {
 		dnsRule, err := json.Marshal(map[string]interface{}{
 			"port":        "53",

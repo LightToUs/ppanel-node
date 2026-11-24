@@ -5,8 +5,121 @@ import (
 	"testing"
 
 	"github.com/lighttous/ppanel-node/api/panel"
+	"github.com/xtls/xray-core/app/router"
 	xnet "github.com/xtls/xray-core/common/net"
+	"github.com/xtls/xray-core/common/session"
+	routing_session "github.com/xtls/xray-core/features/routing/session"
+	coreConf "github.com/xtls/xray-core/infra/conf"
 )
+
+const securityRuleCount = 3
+
+func assertSecurityRules(t *testing.T, rules []*router.RoutingRule) {
+	t.Helper()
+	if len(rules) < securityRuleCount {
+		t.Fatalf("route rules len = %d, want at least %d security rules", len(rules), securityRuleCount)
+	}
+
+	privateRule := rules[0]
+	if privateRule.GetRuleTag() != "security-private-network" ||
+		privateRule.GetTag() != "block" ||
+		len(privateRule.GetIp()) != len(privateTargetCIDRs) {
+		t.Fatalf("private network rule = %v, want mandatory private target block", privateRule)
+	}
+
+	smtpRule := rules[1]
+	if smtpRule.GetRuleTag() != "security-smtp" ||
+		smtpRule.GetTag() != "block" ||
+		len(smtpRule.GetNetworks()) != 1 ||
+		smtpRule.GetNetworks()[0] != xnet.Network_TCP {
+		t.Fatalf("SMTP rule = %v, want mandatory TCP block", smtpRule)
+	}
+	wantPorts := []uint32{25, 465, 587}
+	gotPorts := smtpRule.GetPortList().Ports()
+	if len(gotPorts) != len(wantPorts) {
+		t.Fatalf("SMTP blocked ports = %v, want %v", gotPorts, wantPorts)
+	}
+	for i := range wantPorts {
+		if gotPorts[i] != wantPorts[i] {
+			t.Fatalf("SMTP blocked ports = %v, want %v", gotPorts, wantPorts)
+		}
+	}
+
+	bittorrentRule := rules[2]
+	if bittorrentRule.GetRuleTag() != "security-bittorrent" ||
+		bittorrentRule.GetTag() != "block" ||
+		len(bittorrentRule.GetProtocol()) != 1 ||
+		bittorrentRule.GetProtocol()[0] != "bittorrent" {
+		t.Fatalf("BitTorrent rule = %v, want mandatory protocol block", bittorrentRule)
+	}
+}
+
+func TestSecurityRulesBlockAbuseWithoutMatchingNormalProxyTraffic(t *testing.T) {
+	rawRules, err := buildSecurityRules()
+	if err != nil {
+		t.Fatalf("buildSecurityRules() error = %v", err)
+	}
+	config := &coreConf.RouterConfig{RuleList: rawRules}
+	built, err := config.Build()
+	if err != nil {
+		t.Fatalf("build security router config: %v", err)
+	}
+
+	testCases := []struct {
+		name      string
+		target    xnet.Destination
+		protocol  string
+		wantMatch int
+	}{
+		{
+			name:      "normal HTTPS",
+			target:    xnet.TCPDestination(xnet.ParseAddress("8.8.8.8"), 443),
+			protocol:  "tls",
+			wantMatch: -1,
+		},
+		{
+			name:      "private target",
+			target:    xnet.TCPDestination(xnet.ParseAddress("10.0.0.1"), 443),
+			protocol:  "tls",
+			wantMatch: 0,
+		},
+		{
+			name:      "SMTP submission",
+			target:    xnet.TCPDestination(xnet.ParseAddress("8.8.8.8"), 587),
+			protocol:  "tls",
+			wantMatch: 1,
+		},
+		{
+			name:      "BitTorrent",
+			target:    xnet.TCPDestination(xnet.ParseAddress("8.8.8.8"), 443),
+			protocol:  "bittorrent",
+			wantMatch: 2,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			context := &routing_session.Context{
+				Outbound: &session.Outbound{Target: testCase.target},
+				Content:  &session.Content{Protocol: testCase.protocol},
+			}
+			gotMatch := -1
+			for i, rule := range built.GetRule() {
+				condition, err := rule.BuildCondition()
+				if err != nil {
+					t.Fatalf("BuildCondition() error = %v", err)
+				}
+				if condition.Apply(context) {
+					gotMatch = i
+					break
+				}
+			}
+			if gotMatch != testCase.wantMatch {
+				t.Fatalf("matched security rule %d, want %d", gotMatch, testCase.wantMatch)
+			}
+		})
+	}
+}
 
 func TestGetCustomConfigSkipsEmptyBlockRules(t *testing.T) {
 	dns := []panel.DNSItem{}
@@ -27,8 +140,12 @@ func TestGetCustomConfigSkipsEmptyBlockRules(t *testing.T) {
 		t.Fatalf("GetCustomConfig() error = %v", err)
 	}
 
-	if got := len(routeConfig.GetRule()); got != 1 {
-		t.Fatalf("route rules len = %d, want only default DNS rule", got)
+	if got := routeConfig.GetDomainStrategy(); got != router.Config_IpOnDemand {
+		t.Fatalf("domain strategy = %v, want IP-on-demand private target validation", got)
+	}
+	assertSecurityRules(t, routeConfig.GetRule())
+	if got := len(routeConfig.GetRule()); got != securityRuleCount+1 {
+		t.Fatalf("route rules len = %d, want security rules + default DNS rule", got)
 	}
 }
 
@@ -89,8 +206,9 @@ func TestGetCustomConfigBuildsTypedOutbound(t *testing.T) {
 	if got := len(outbounds); got != 4 {
 		t.Fatalf("outbounds len = %d, want 4", got)
 	}
-	if got := len(routeConfig.GetRule()); got != 2 {
-		t.Fatalf("route rules len = %d, want default DNS + custom outbound", got)
+	assertSecurityRules(t, routeConfig.GetRule())
+	if got := len(routeConfig.GetRule()); got != securityRuleCount+2 {
+		t.Fatalf("route rules len = %d, want security rules + default DNS + custom outbound", got)
 	}
 }
 
@@ -126,8 +244,9 @@ func TestGetCustomConfigUsesRawOutboundSettings(t *testing.T) {
 	if got := outbounds[3].Tag; got != "direct-cn" {
 		t.Fatalf("custom outbound tag = %q, want direct-cn", got)
 	}
-	if got := len(routeConfig.GetRule()); got != 2 {
-		t.Fatalf("route rules len = %d, want default DNS + custom outbound", got)
+	assertSecurityRules(t, routeConfig.GetRule())
+	if got := len(routeConfig.GetRule()); got != securityRuleCount+2 {
+		t.Fatalf("route rules len = %d, want security rules + default DNS + custom outbound", got)
 	}
 }
 
@@ -161,8 +280,9 @@ func TestGetCustomConfigSkipsUnsupportedOutboundWithoutRawSettings(t *testing.T)
 	if got := len(outbounds); got != 3 {
 		t.Fatalf("outbounds len = %d, want only default outbounds", got)
 	}
-	if got := len(routeConfig.GetRule()); got != 1 {
-		t.Fatalf("route rules len = %d, want only default DNS rule", got)
+	assertSecurityRules(t, routeConfig.GetRule())
+	if got := len(routeConfig.GetRule()); got != securityRuleCount+1 {
+		t.Fatalf("route rules len = %d, want security rules + default DNS rule", got)
 	}
 }
 
@@ -195,8 +315,9 @@ func TestGetCustomConfigKeepsCompatibilityForInvalidLegacyOutbound(t *testing.T)
 	if got := len(outbounds); got != 3 {
 		t.Fatalf("outbounds len = %d, want invalid legacy outbound skipped", got)
 	}
-	if got := len(routeConfig.GetRule()); got != 1 {
-		t.Fatalf("route rules len = %d, want only default DNS rule", got)
+	assertSecurityRules(t, routeConfig.GetRule())
+	if got := len(routeConfig.GetRule()); got != securityRuleCount+1 {
+		t.Fatalf("route rules len = %d, want security rules + default DNS rule", got)
 	}
 }
 
@@ -241,20 +362,22 @@ func TestGetCustomConfigRoutesAllTCPAndUDPThroughWireGuard(t *testing.T) {
 		t.Fatalf("outbounds len = %d, want 4", got)
 	}
 	rules := routeConfig.GetRule()
-	if got := len(rules); got != 2 {
-		t.Fatalf("route rules len = %d, want block + full-route", got)
+	assertSecurityRules(t, rules)
+	if got := len(rules); got != securityRuleCount+2 {
+		t.Fatalf("route rules len = %d, want security rules + custom block + full-route", got)
 	}
-	if got := rules[0].GetTag(); got != "block" {
-		t.Fatalf("first route tag = %q, want block", got)
+	if got := rules[securityRuleCount].GetTag(); got != "block" {
+		t.Fatalf("custom block route tag = %q, want block", got)
 	}
-	if got := rules[1].GetTag(); got != "server-egress" {
+	if got := rules[securityRuleCount+1].GetTag(); got != "server-egress" {
 		t.Fatalf("full route tag = %q, want server-egress", got)
 	}
-	if got := rules[1].GetNetworks(); len(got) != 2 ||
+	if got := rules[securityRuleCount+1].GetNetworks(); len(got) != 2 ||
 		got[0] != xnet.Network_TCP || got[1] != xnet.Network_UDP {
 		t.Fatalf("full route networks = %v, want TCP and UDP", got)
 	}
-	if rules[0].GetPortList() != nil || rules[1].GetPortList() != nil {
+	if rules[securityRuleCount].GetPortList() != nil ||
+		rules[securityRuleCount+1].GetPortList() != nil {
 		t.Fatal("full-route mode must not install the local UDP 53 interception rule")
 	}
 }
@@ -344,19 +467,20 @@ func TestGetCustomConfigUsesManagedSocksEgressAndBlocksUnsupportedUDP(t *testing
 		t.Fatalf("outbounds len = %d, want defaults + custom + managed", got)
 	}
 	rules := routeConfig.GetRule()
-	if got := len(rules); got != 2 {
-		t.Fatalf("route rules len = %d, want UDP block + managed TCP route", got)
+	assertSecurityRules(t, rules)
+	if got := len(rules); got != securityRuleCount+2 {
+		t.Fatalf("route rules len = %d, want security rules + UDP block + managed TCP route", got)
 	}
-	if got := rules[0].GetTag(); got != "block" {
+	if got := rules[securityRuleCount].GetTag(); got != "block" {
 		t.Fatalf("unsupported network route tag = %q, want block", got)
 	}
-	if got := rules[0].GetNetworks(); len(got) != 1 || got[0] != xnet.Network_UDP {
+	if got := rules[securityRuleCount].GetNetworks(); len(got) != 1 || got[0] != xnet.Network_UDP {
 		t.Fatalf("blocked networks = %v, want UDP", got)
 	}
-	if got := rules[1].GetTag(); got != "managed-egress" {
+	if got := rules[securityRuleCount+1].GetTag(); got != "managed-egress" {
 		t.Fatalf("managed route tag = %q, want managed-egress", got)
 	}
-	if got := rules[1].GetNetworks(); len(got) != 1 || got[0] != xnet.Network_TCP {
+	if got := rules[securityRuleCount+1].GetNetworks(); len(got) != 1 || got[0] != xnet.Network_TCP {
 		t.Fatalf("managed networks = %v, want TCP", got)
 	}
 }
@@ -390,7 +514,8 @@ func TestGetCustomConfigIgnoresDisabledManagedEgress(t *testing.T) {
 	if got := len(outbounds); got != 3 {
 		t.Fatalf("outbounds len = %d, want only defaults", got)
 	}
-	if got := len(routeConfig.GetRule()); got != 1 {
-		t.Fatalf("route rules len = %d, want default DNS route", got)
+	assertSecurityRules(t, routeConfig.GetRule())
+	if got := len(routeConfig.GetRule()); got != securityRuleCount+1 {
+		t.Fatalf("route rules len = %d, want security rules + default DNS route", got)
 	}
 }
