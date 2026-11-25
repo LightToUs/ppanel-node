@@ -33,7 +33,6 @@ type Controller struct {
 	presenceRenewPeriodic   *task.Task
 	abuseReportPeriodic     *task.Task
 	portHopping             *portHoppingManager
-	accessEvents            *accessEventStore
 	abuseEvents             *abuseAggregator
 	unregisterAbuseObserver func()
 	pendingAbuseAggregates  []panel.AbuseAggregate
@@ -104,7 +103,6 @@ func (c *Controller) Start() error {
 	var nodeAdded bool
 	var limiterAdded bool
 	var portHoppingAdded bool
-	var accessStoreOpened bool
 	var trafficStoreOpened bool
 	var quotaManagerOpened bool
 	var abuseObserverRegistered bool
@@ -140,13 +138,6 @@ func (c *Controller) Start() error {
 		if limiterAdded && c.tag != "" {
 			limiter.DeleteLimiter(c.tag)
 		}
-		if accessStoreOpened && c.accessEvents != nil {
-			if closeErr := c.accessEvents.Close(); closeErr != nil {
-				log.WithFields(log.Fields{"tag": c.tag, "err": closeErr}).
-					Error("Start rollback: close access event store failed")
-			}
-			c.accessEvents = nil
-		}
 		if trafficStoreOpened && c.trafficBatches != nil {
 			if closeErr := c.trafficBatches.Close(); closeErr != nil {
 				log.WithFields(log.Fields{"tag": c.tag, "err": closeErr}).
@@ -169,6 +160,9 @@ func (c *Controller) Start() error {
 	}
 	if err = c.loadControlState(); err != nil {
 		return fmt.Errorf("load subscription control state: %w", err)
+	}
+	if cleanupErr := removeAccessEventState(c.statePath); cleanupErr != nil {
+		log.WithError(cleanupErr).Warn("Remove retired access event state failed")
 	}
 	c.tag = c.buildNodeTag(c.info)
 	c.abuseEvents = newAbuseAggregator(c.tag, c.info.Type, c.userList)
@@ -214,15 +208,6 @@ func (c *Controller) Start() error {
 			c.authorizePresence,
 		)
 	}
-	if c.info.AccessAuditEnabled {
-		c.accessEvents, err = openAccessEventStore(c.statePath, c.info.Id, c.info.Type)
-		if err != nil {
-			return fmt.Errorf("open access event store: %w", err)
-		}
-		accessStoreOpened = true
-		c.limiter.SetAccessRecorder(c.recordAccessEvent, accessEventIdleWindow(c.info))
-	}
-
 	// Add new tag
 	err = c.server.AddNode(c.tag, c.info)
 	if err != nil {
@@ -298,10 +283,6 @@ func (c *Controller) Close() error {
 		limiter.DeleteLimiter(c.tag)
 	}
 	var closeErr error
-	if c.accessEvents != nil {
-		closeErr = c.accessEvents.Close()
-		c.accessEvents = nil
-	}
 	if c.trafficBatches != nil {
 		closeErr = errors.Join(closeErr, c.trafficBatches.Close())
 		c.trafficBatches = nil

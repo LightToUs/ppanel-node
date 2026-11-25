@@ -1,7 +1,6 @@
 package node
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,7 +10,6 @@ import (
 	"time"
 
 	"github.com/lighttous/ppanel-node/api/panel"
-	log "github.com/sirupsen/logrus"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -21,6 +19,13 @@ var unsafeStateFileChars = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 
 type accessEventStore struct {
 	db *bolt.DB
+}
+
+func removeAccessEventState(statePath string) error {
+	if statePath == "" {
+		statePath = "/var/lib/ppanel-node"
+	}
+	return os.RemoveAll(filepath.Join(statePath, "access-events"))
 }
 
 func openAccessEventStore(statePath string, serverID int, protocol string) (*accessEventStore, error) {
@@ -112,42 +117,4 @@ func accessEventIdleWindow(info *panel.NodeInfo) time.Duration {
 		window = 90 * time.Second
 	}
 	return window
-}
-
-func (c *Controller) recordAccessEvent(event panel.AccessEvent) error {
-	if c.accessEvents == nil {
-		return errors.New("access event store is not open")
-	}
-	return c.accessEvents.Put(event)
-}
-
-func (c *Controller) reportAccessEvents(ctx context.Context) {
-	if c.accessEvents == nil {
-		return
-	}
-	for batch := 0; batch < 5; batch++ {
-		events, err := c.accessEvents.List(500)
-		if err != nil {
-			log.WithFields(log.Fields{"tag": c.tag, "err": err}).
-				Error("Read access event queue failed")
-			return
-		}
-		if len(events) == 0 {
-			return
-		}
-		if err = c.apiClient.ReportAccessEvents(ctx, events); err != nil {
-			log.WithFields(log.Fields{"tag": c.tag, "err": err}).
-				Warn("Report access events failed; events retained for retry")
-			return
-		}
-		if err = c.accessEvents.Delete(events); err != nil {
-			log.WithFields(log.Fields{"tag": c.tag, "err": err}).
-				Error("Acknowledge access events failed")
-			return
-		}
-		log.WithField("节点", c.tag).Infof("已上报 %d 条访问事件", len(events))
-		if len(events) < 500 {
-			return
-		}
-	}
 }

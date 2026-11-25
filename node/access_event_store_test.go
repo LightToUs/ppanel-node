@@ -1,11 +1,30 @@
 package node
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/lighttous/ppanel-node/api/panel"
 )
+
+func TestRemoveAccessEventStateDeletesRetiredQueue(t *testing.T) {
+	statePath := t.TempDir()
+	store, err := openAccessEventStore(statePath, 49, "hysteria2")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err = store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+	dir := filepath.Join(statePath, "access-events")
+	if err = removeAccessEventState(statePath); err != nil {
+		t.Fatalf("remove state: %v", err)
+	}
+	if _, err = os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("retired access event directory still exists: %v", err)
+	}
+}
 
 func TestAccessEventStorePersistsUntilAcknowledged(t *testing.T) {
 	statePath := t.TempDir()

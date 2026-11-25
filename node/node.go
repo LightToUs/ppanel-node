@@ -86,7 +86,7 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 			Id:                     config.ApiConfig.ServerId,
 			Type:                   nodeconfig.Type,
 			TrafficReportThreshold: serverconfig.Data.TrafficReportThreshold,
-			AccessAuditEnabled:     serverconfig.Data.AccessAuditEnabled,
+			AccessAuditEnabled:     false,
 			PresenceMode:           serverconfig.Data.PresenceMode,
 			PresenceLeaseTTL:       serverconfig.Data.PresenceLeaseTTL,
 			QuotaLeaseMode:         serverconfig.Data.QuotaLeaseMode,

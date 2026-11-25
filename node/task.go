@@ -300,10 +300,6 @@ func (c *Controller) applyUserChanges(
 }
 
 func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
-	// Access events use their own durable queue and are acknowledged only after a
-	// successful server response, so a traffic report failure cannot drop them.
-	c.reportAccessEvents(ctx)
-
 	var reportmin = 0
 	if c.info.TrafficReportThreshold > 0 {
 		reportmin = c.info.TrafficReportThreshold

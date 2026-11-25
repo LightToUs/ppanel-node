@@ -81,7 +81,8 @@ func TestNewKeepsFeaturesDisabledForLegacyServerResponse(t *testing.T) {
 	}}
 	serverConfig := &panel.ServerConfigResponse{
 		Data: &panel.Data{
-			Protocols: &protocols,
+			Protocols:          &protocols,
+			AccessAuditEnabled: true,
 		},
 	}
 	runtimeConfig := &conf.Conf{
@@ -101,7 +102,7 @@ func TestNewKeepsFeaturesDisabledForLegacyServerResponse(t *testing.T) {
 	}
 	info := node.controllers[0].info
 	if info.AccessAuditEnabled {
-		t.Fatal("legacy response unexpectedly enabled access audit")
+		t.Fatal("server response unexpectedly enabled retired access audit")
 	}
 	if mode := normalizedPresenceMode(info.PresenceMode); mode != "disabled" {
 		t.Fatalf("legacy response presence mode = %q, want disabled", mode)
