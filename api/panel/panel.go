@@ -13,10 +13,9 @@ import (
 	"github.com/lighttous/ppanel-node/conf"
 )
 
-const (
-	nodeVersion      = "v1.8.3-abuse-aggregation"
-	nodeCapabilities = "wireguard-inbound-v1,wg-user-schema-v1,wg-peer-identity-v1,relay-egress-v1,traffic-quota-lease-v1,traffic-pool-fail-closed-v1,abuse-aggregation-v1"
-)
+var nodeVersion = "development"
+
+const nodeCapabilities = "wireguard-inbound-v1,wg-user-schema-v1,wg-peer-identity-v1,relay-egress-v1,traffic-quota-lease-v1,traffic-pool-fail-closed-v1,abuse-aggregation-v1"
 
 type ClientV1 struct {
 	Client            *resty.Client
