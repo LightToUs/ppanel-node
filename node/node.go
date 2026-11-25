@@ -16,6 +16,7 @@ type Node struct {
 	controllers  []*Controller
 	relayAgent   *RelayAgent
 	metricsAgent *MetricsAgent
+	controlAgent *controlAgent
 }
 
 type ControllerSnapshot struct {
@@ -109,6 +110,12 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 	}
 	node.metricsAgent.SetBusinessProtocols(*serverconfig.Data.Protocols)
 	node.metricsAgent.SetCertificateSource(node.certificateReports)
+	node.controlAgent = newControlAgent(metricsClient, node.controllers)
+	for _, controller := range node.controllers {
+		if controller != nil {
+			controller.refreshControlTracking = node.controlAgent.refreshTracking
+		}
+	}
 
 	return node, nil
 }
@@ -261,6 +268,9 @@ func (n *Node) Start() error {
 	if n.metricsAgent != nil {
 		n.metricsAgent.Start()
 	}
+	if n.controlAgent != nil {
+		n.controlAgent.Start()
+	}
 	return nil
 }
 
@@ -269,6 +279,9 @@ func (n *Node) Close() error {
 		return nil
 	}
 	var closeErr error
+	if n.controlAgent != nil {
+		n.controlAgent.Close()
+	}
 	if n.metricsAgent != nil {
 		n.metricsAgent.Close()
 	}

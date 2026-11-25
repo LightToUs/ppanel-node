@@ -44,6 +44,10 @@ type Controller struct {
 	trafficBatches          *trafficBatchStore
 	quotaManager            *nodequota.Manager
 	statePath               string
+	userMutationMu          sync.Mutex
+	controlRevisions        map[int64]int64
+	controlStates           map[int64]string
+	refreshControlTracking  func()
 	trafficReportMu         sync.Mutex
 	pendingTrafficBatch     *vCore.UserTrafficBatch
 }
@@ -51,9 +55,11 @@ type Controller struct {
 // NewController return a Node controller with default parameters.
 func NewController(core *vCore.XrayCore, api *panel.ClientV1, info *panel.NodeInfo, statePath ...string) *Controller {
 	controller := &Controller{
-		server:    core,
-		apiClient: api,
-		info:      info,
+		server:           core,
+		apiClient:        api,
+		info:             info,
+		controlRevisions: make(map[int64]int64),
+		controlStates:    make(map[int64]string),
 	}
 	if len(statePath) > 0 {
 		controller.statePath = statePath[0]
@@ -160,6 +166,9 @@ func (c *Controller) Start() error {
 
 	if err = c.Prepare(); err != nil {
 		return err
+	}
+	if err = c.loadControlState(); err != nil {
+		return fmt.Errorf("load subscription control state: %w", err)
 	}
 	c.tag = c.buildNodeTag(c.info)
 	c.abuseEvents = newAbuseAggregator(c.tag, c.info.Type, c.userList)

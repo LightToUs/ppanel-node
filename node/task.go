@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"time"
 
@@ -121,14 +122,25 @@ func (c *Controller) refreshPresenceTask(_ context.Context) error {
 }
 
 func (c *Controller) userListMonitor(ctx context.Context) (err error) {
-	// get user info
-	newU, err := c.apiClient.GetUserList(ctx)
+	err = c.syncUserList(ctx)
 	if err != nil {
 		log.WithFields(log.Fields{
 			"tag": c.tag,
 			"err": err,
-		}).Error("Get user list failed")
-		return nil
+		}).Error("Synchronize user list failed")
+	}
+	// Periodic task errors are logged here so a transient panel failure does not
+	// terminate the scheduler. Control events call syncUserList directly.
+	return nil
+}
+
+func (c *Controller) syncUserList(ctx context.Context) (err error) {
+	c.userMutationMu.Lock()
+	defer c.userMutationMu.Unlock()
+	// get user info
+	newU, err := c.apiClient.GetUserList(ctx)
+	if err != nil {
+		return fmt.Errorf("get user list: %w", err)
 	}
 	// get user alive
 	newA, err := c.apiClient.GetUserAlive()
@@ -136,8 +148,8 @@ func (c *Controller) userListMonitor(ctx context.Context) (err error) {
 		log.WithFields(log.Fields{
 			"tag": c.tag,
 			"err": err,
-		}).Error("Get alive list failed")
-		return nil
+		}).Warn("Get alive list failed")
+		newA = nil
 	}
 	// update alive list
 	if newA != nil {
@@ -148,6 +160,7 @@ func (c *Controller) userListMonitor(ctx context.Context) (err error) {
 	if newU == nil {
 		return nil
 	}
+	newU = c.filterRevokedUsers(newU)
 	deleted, added, updated := compareUserList(c.userList, newU)
 	if len(added) > 0 || len(deleted) > 0 || len(updated) > 0 {
 		if c.quotaManager != nil {
@@ -155,7 +168,7 @@ func (c *Controller) userListMonitor(ctx context.Context) (err error) {
 				c.apiClient.ResetUserETag()
 				log.WithFields(log.Fields{"tag": c.tag, "err": err}).
 					Error("Persist quota user changes failed")
-				return nil
+				return fmt.Errorf("persist quota user changes: %w", err)
 			}
 		}
 	}
@@ -169,7 +182,7 @@ func (c *Controller) userListMonitor(ctx context.Context) (err error) {
 		c.apiClient.ResetUserETag()
 		log.WithFields(log.Fields{"tag": c.tag, "err": err}).
 			Error("Apply user changes failed; runtime changes rolled back")
-		return nil
+		return fmt.Errorf("apply user changes: %w", err)
 	}
 	if len(added) > 0 || len(deleted) > 0 || len(updated) > 0 {
 		// update Limiter
@@ -178,6 +191,10 @@ func (c *Controller) userListMonitor(ctx context.Context) (err error) {
 	c.userList = newU
 	if c.abuseEvents != nil {
 		c.abuseEvents.UpdateUsers(newU)
+	}
+	if (len(added) > 0 || len(deleted) > 0) &&
+		c.refreshControlTracking != nil {
+		c.refreshControlTracking()
 	}
 	if len(added)+len(deleted)+len(updated) != 0 {
 		log.WithField("节点", c.tag).

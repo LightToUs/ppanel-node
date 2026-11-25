@@ -15,7 +15,7 @@ import (
 
 var nodeVersion = "development"
 
-const nodeCapabilities = "wireguard-inbound-v1,wg-user-schema-v1,wg-peer-identity-v1,relay-egress-v1,traffic-quota-lease-v1,traffic-pool-fail-closed-v1,abuse-aggregation-v1"
+const nodeCapabilities = "wireguard-inbound-v1,wg-user-schema-v1,wg-peer-identity-v1,relay-egress-v1,traffic-quota-lease-v1,traffic-pool-fail-closed-v1,abuse-aggregation-v1,subscription-control-v1"
 
 type ClientV1 struct {
 	Client            *resty.Client
