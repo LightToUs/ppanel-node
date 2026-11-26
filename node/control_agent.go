@@ -24,12 +24,13 @@ type controlAgent struct {
 	client      *panel.ClientV1
 	controllers []*Controller
 
-	startOnce sync.Once
-	closeOnce sync.Once
-	cancel    context.CancelFunc
-	done      chan struct{}
-	connMu    sync.Mutex
-	conn      *websocket.Conn
+	startOnce   sync.Once
+	closeOnce   sync.Once
+	cancel      context.CancelFunc
+	done        chan struct{}
+	connMu      sync.Mutex
+	conn        *websocket.Conn
+	refreshConn *websocket.Conn
 
 	lastConnectionLog time.Time
 }
@@ -97,8 +98,11 @@ func (a *controlAgent) run(ctx context.Context) {
 				)
 			})
 			err = a.readLoop(ctx, conn)
-			a.clearConnection(conn)
+			plannedRefresh := a.clearConnection(conn)
 			_ = conn.Close()
+			if plannedRefresh {
+				continue
+			}
 		}
 		if ctx.Err() != nil {
 			return
@@ -124,12 +128,17 @@ func (a *controlAgent) setConnection(conn *websocket.Conn) {
 	a.connMu.Unlock()
 }
 
-func (a *controlAgent) clearConnection(conn *websocket.Conn) {
+func (a *controlAgent) clearConnection(conn *websocket.Conn) bool {
 	a.connMu.Lock()
 	if a.conn == conn {
 		a.conn = nil
 	}
+	plannedRefresh := a.refreshConn == conn
+	if plannedRefresh {
+		a.refreshConn = nil
+	}
 	a.connMu.Unlock()
+	return plannedRefresh
 }
 
 func (a *controlAgent) closeConnection() {
@@ -148,7 +157,16 @@ func (a *controlAgent) refreshTracking() {
 	}
 	// Reconnecting rebuilds the server-side subject filter and obtains a fresh
 	// snapshot, closing the race between a newly tracked user and its next event.
-	a.closeConnection()
+	a.connMu.Lock()
+	conn := a.conn
+	if conn != nil {
+		a.conn = nil
+		a.refreshConn = conn
+	}
+	a.connMu.Unlock()
+	if conn != nil {
+		_ = conn.Close()
+	}
 }
 
 func (a *controlAgent) readLoop(ctx context.Context, conn controlConnection) error {

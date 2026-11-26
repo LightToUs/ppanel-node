@@ -98,6 +98,42 @@ func TestControlAgentCloseInterruptsBlockedRead(t *testing.T) {
 	}
 }
 
+func TestControlAgentTrackingRefreshIsNotAConnectionFailure(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(
+		writer http.ResponseWriter,
+		request *http.Request,
+	) {
+		conn, err := (&websocket.Upgrader{}).Upgrade(writer, request, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		<-release
+	}))
+	defer server.Close()
+	defer close(release)
+
+	conn, _, err := websocket.DefaultDialer.Dial(
+		"ws"+strings.TrimPrefix(server.URL, "http"),
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("dial test websocket: %v", err)
+	}
+	agent := &controlAgent{conn: conn}
+
+	agent.refreshTracking()
+	if !agent.clearConnection(conn) {
+		t.Fatal("tracking refresh was not marked as planned")
+	}
+
+	agent.setConnection(conn)
+	if agent.clearConnection(conn) {
+		t.Fatal("ordinary connection close was marked as planned")
+	}
+}
+
 func TestAuthorizedControlRollsBackRevisionWhenSyncFails(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(
 		writer http.ResponseWriter,
